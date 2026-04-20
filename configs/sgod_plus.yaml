@@ -1,0 +1,16 @@
+# SGOD+ Configuration — Fine-tuned RelTR variant (Section 9.3)
+
+sgg:
+  model: "reltr"
+  checkpoint: "data/checkpoints/reltr/reltr_gqa_finetuned.pth"
+  confidence_threshold: 0.4
+
+# RelTR Fine-tuning hyperparameters
+reltr_finetune:
+  backbone: "resnet50"
+  pretrained_weights: "data/checkpoints/reltr/reltr_visual_genome.pth"
+  dataset: "gqa"
+  data_path: "data/gqa/"
+  epochs: 10
+  lr: 1.0e-5
+  batch_size: 8

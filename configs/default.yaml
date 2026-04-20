@@ -1,0 +1,42 @@
+# SGOD Default Configuration
+# See docs/sgod_proposal.md for full architecture details.
+
+# --- SGG Module (Component 1) ---
+sgg:
+  model: "reltr"
+  checkpoint: "data/checkpoints/reltr/reltr_visual_genome.pth"
+  confidence_threshold: 0.4    # Below this → deactivate oracle (Section 4.5)
+
+# --- Visual Oracle (Component 2) ---
+oracle:
+  clip_model: "ViT-L/14"
+  clip_vocab_cache: "data/checkpoints/clip/clip_vocab_cache.pt"
+  top_k: 50                    # Top-K candidate re-ranking (Risk 3)
+  dual_source: true            # SGG + CLIP fallback
+
+# --- Anchor Detector (Component 3) ---
+anchor:
+  use_spacy: false             # Upgrade path: switch to spaCy noun_chunks
+
+# --- Generation Context (Component 4) ---
+context:
+  base_lambda:
+    existential: 0.50
+    descriptive: 0.35
+    comparative: 0.20
+    hypothetical: 0.00
+    general: 0.25
+  negation_decay: 0.25
+  max_negation_depth: 3.0
+
+# --- Decoder (Component 5) ---
+decoder:
+  vlm_model: "llava-hf/llava-1.5-7b-hf"
+  max_new_tokens: 256
+  temperature: 0.7
+  oracle_lambda: 0.35          # Base lambda, overridden by context
+
+# --- Hardware ---
+hardware:
+  device: "cuda"
+  dtype: "float16"

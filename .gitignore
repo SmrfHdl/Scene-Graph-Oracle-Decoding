@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Run outputs (keep directory structure via .gitkeep)
+outputs/**
+!outputs/**/.gitkeep
+
+data/checkpoints/**
+!data/checkpoints/**/.gitkeep

@@ -1,0 +1,17 @@
+# SGOD++ Configuration — LoRA fine-tuned LLaVA variant (Section 9.4)
+
+lora:
+  r: 16
+  lora_alpha: 32
+  target_modules: ["q_proj", "v_proj"]
+  lora_dropout: 0.05
+  bias: "none"
+  task_type: "CAUSAL_LM"
+
+training:
+  epochs: 5
+  gradient_accumulation_steps: 8
+  per_device_batch_size: 2
+  learning_rate: 2.0e-5
+  warmup_ratio: 0.03
+  gradient_checkpointing: true

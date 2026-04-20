@@ -1,0 +1,19 @@
+[project]
+name = "sgod"
+version = "0.1.0"
+description = "SGOD: Scene-Graph Oracle Decoding for VLM Hallucination Mitigation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "torchvision",
+    "open-clip-torch",
+    "transformers",
+    "Pillow",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-json-report", "ruff"]
+train = ["peft"]  # LoRA for SGOD++
+eval = ["lmms-eval"]
