@@ -7,11 +7,13 @@ DETERMINERS: frozenset[str] = frozenset({
 })
 
 # Single-token spatial prepositions.
+# Sourced from RelTR's 51-class RELATION_CLASSES + common English spatial preps.
 # Multi-word preps ("next to", "in front of") are handled separately in
 # detect_anchor via bigram/trigram checks on prev_tokens.
 SPATIAL_PREPS: frozenset[str] = frozenset({
     "on", "under", "above", "below", "beside",
     "behind", "near", "between", "inside", "outside",
+    "at", "in", "over", "across", "against", "along",
 })
 
 # Multi-word spatial prepositions as space-joined strings (for bigram/trigram matching)

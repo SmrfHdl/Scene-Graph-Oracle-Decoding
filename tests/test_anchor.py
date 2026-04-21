@@ -26,7 +26,8 @@ def test_determiners_content():
 
 
 def test_spatial_preps_single_content():
-    assert {"on", "under", "above", "below", "near", "behind", "beside"} <= SPATIAL_PREPS
+    assert {"on", "under", "above", "below", "near", "behind", "beside",
+            "at", "in", "over", "across", "against", "along"} <= SPATIAL_PREPS
 
 
 def test_spatial_preps_multi_content():
@@ -83,7 +84,8 @@ def test_determiner_before_any_word():
 
 # ── Rule 2: Single-token spatial prep → noun_anchor ──────────────────────────
 
-@pytest.mark.parametrize("prep", ["on", "under", "above", "below", "beside", "behind", "near"])
+@pytest.mark.parametrize("prep", ["on", "under", "above", "below", "beside", "behind", "near",
+                                   "at", "in", "over", "across", "against", "along"])
 def test_spatial_prep_prev_yields_noun_anchor(prep):
     assert detect_anchor([prep], "table") == "noun_anchor"
 
@@ -118,7 +120,8 @@ def test_multi_word_prep_case_insensitive():
 
 # ── Rule 4: Current token is spatial prep → relation_anchor ──────────────────
 
-@pytest.mark.parametrize("prep", ["on", "under", "above", "below", "beside", "behind", "near"])
+@pytest.mark.parametrize("prep", ["on", "under", "above", "below", "beside", "behind", "near",
+                                   "at", "in", "over", "across", "against", "along"])
 def test_current_is_spatial_prep_yields_relation_anchor(prep):
     assert detect_anchor(["dog"], prep) == "relation_anchor"
 
@@ -269,3 +272,18 @@ def test_sentence_next_to():
 def test_sentence_in_front_of():
     # "standing in front of [a]"
     assert detect_anchor(["standing", "in", "front", "of"], "a") == "noun_anchor"
+
+
+def test_sentence_chair_at_table():
+    # RelTR common pattern: "chair [at] the table"
+    assert detect_anchor(["chair"], "at") == "relation_anchor"
+
+
+def test_sentence_at_the_table():
+    # "chair at [the] table" — prev="at" is spatial prep → noun_anchor
+    assert detect_anchor(["chair", "at"], "the") == "noun_anchor"
+
+
+def test_sentence_over_the_fence():
+    assert detect_anchor(["jumping"], "over") == "relation_anchor"
+    assert detect_anchor(["jumping", "over"], "the") == "noun_anchor"
