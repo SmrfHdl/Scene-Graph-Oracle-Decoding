@@ -168,6 +168,28 @@ def test_color_after_neutral_prev_is_attr():
     assert detect_anchor(["is"], "yellow") == "attr_anchor"
 
 
+# ── Rule 1b: det + adjective + noun → noun_anchor ────────────────────────────
+
+def test_noun_after_det_size_adj():
+    # "a large [table]" — prev="large", two_back="a" (determiner)
+    assert detect_anchor(["a", "large"], "table") == "noun_anchor"
+
+
+def test_noun_after_det_color_adj():
+    # "the black [dog]"
+    assert detect_anchor(["the", "black"], "dog") == "noun_anchor"
+
+
+def test_noun_after_det_size_adj_longer_context():
+    # "There is a large [table]"
+    assert detect_anchor(["There", "is", "a", "large"], "table") == "noun_anchor"
+
+
+def test_rule1b_does_not_fire_without_det_two_back():
+    # "is large [table]" — two_back="is" is not a determiner → neutral
+    assert detect_anchor(["is", "large"], "table") == "neutral"
+
+
 # ── Rule priority ─────────────────────────────────────────────────────────────
 
 def test_determiner_beats_attr_on_prev():

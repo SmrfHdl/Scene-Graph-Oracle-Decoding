@@ -73,10 +73,10 @@ def load_relation_questions(
     with open(q_file) as f:
         all_q = json.load(f)
 
-    # Filter to relation semantic type
+    # Filter to relation semantic type ("rel" per GQA 1.2 schema)
     relation_qs = {
         qid: q for qid, q in all_q.items()
-        if q.get("types", {}).get("semantic") == "relation"
+        if q.get("types", {}).get("semantic") == "rel"
     }
     logger.info("Relation questions: %d / %d total", len(relation_qs), len(all_q))
 
@@ -239,6 +239,16 @@ def run_pilot(args: argparse.Namespace) -> None:
             logger.info("Loading RelTR for variant C ...")
             sgg_module = load_sgg(args.reltr_ckpt)
 
+    # Smoke-test mode: use a single surrogate image for all questions.
+    # Accuracy numbers are meaningless but verifies the full inference loop.
+    smoke_image = None
+    if args.smoke_test_image:
+        smoke_path = Path(args.smoke_test_image)
+        if not smoke_path.exists():
+            raise FileNotFoundError(f"--smoke_test_image not found: {smoke_path}")
+        smoke_image = Image.open(smoke_path).convert("RGB")
+        logger.info("Smoke-test mode: using %s for all questions", smoke_path)
+
     img_dir = gqa_path / "images"
     n_total = len(questions)
 
@@ -251,12 +261,14 @@ def run_pilot(args: argparse.Namespace) -> None:
         if qid in done_ids:
             continue
 
-        img_path = img_dir / f"{img_id}.jpg"
-        if not img_path.exists():
-            logger.warning("[%d/%d] Image not found: %s — skipping", i+1, n_total, img_path)
-            continue
-
-        image = Image.open(img_path).convert("RGB")
+        if smoke_image is not None:
+            image = smoke_image
+        else:
+            img_path = img_dir / f"{img_id}.jpg"
+            if not img_path.exists():
+                logger.warning("[%d/%d] Image not found: %s — skipping", i+1, n_total, img_path)
+                continue
+            image = Image.open(img_path).convert("RGB")
 
         # Variant A: baseline
         t0      = time.perf_counter()
@@ -385,6 +397,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed",        type=int, default=42)
     p.add_argument("--resume",      action="store_true",
                    help="Resume from existing results.json in --output dir")
+    p.add_argument("--smoke_test_image", default=None, metavar="PATH",
+                   help="Use this image for all questions (smoke test — accuracy meaningless)")
     return p.parse_args()
 
 

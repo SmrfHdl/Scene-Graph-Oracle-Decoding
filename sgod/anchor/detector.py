@@ -24,6 +24,7 @@ from sgod.anchor.vocabularies import (
 )
 
 _ANCHOR_TYPES = frozenset({"noun_anchor", "relation_anchor", "attr_anchor", "neutral"})
+_ATTR_WORDS = COLOR_ATTRS | SIZE_ATTRS
 
 
 def detect_anchor(prev_tokens: list[str], current_token: str) -> str:
@@ -38,6 +39,7 @@ def detect_anchor(prev_tokens: list[str], current_token: str) -> str:
 
     Rules (evaluated in priority order):
         1. prev[-1] is a determiner                       → noun_anchor
+        1b. prev[-2] is a determiner (det + adj + noun)   → noun_anchor
         2. cur completes a multi-word spatial prep         → relation_anchor
         3. prev[-1] is a single-token spatial prep         → noun_anchor
         4. prev[-2:] or prev[-3:] forms a multi-word prep → noun_anchor
@@ -47,6 +49,8 @@ def detect_anchor(prev_tokens: list[str], current_token: str) -> str:
 
     Rule 2 must precede Rule 3 so that "dog across [from]" fires relation_anchor
     (completing "across from") rather than noun_anchor (prev="across" is spatial).
+    Rule 1b catches "a large [table]" where Rule 1 fired on "large" but the actual
+    noun "table" would otherwise fall through to neutral.
     """
     if not prev_tokens:
         return "neutral"
@@ -57,6 +61,17 @@ def detect_anchor(prev_tokens: list[str], current_token: str) -> str:
     # Rule 1: Determiner → next token is a noun (or adjective before noun, close enough)
     if prev in DETERMINERS:
         return "noun_anchor"
+
+    # Rule 1b: Noun after "determiner + color/size adj" — "a large [table]", "the black [dog]"
+    # Guards: cur must not be a spatial prep or another attr (those have their own rules).
+    if (
+        len(prev_tokens) >= 2
+        and cur not in _ATTR_WORDS
+        and cur not in SPATIAL_PREPS
+    ):
+        two_back = prev_tokens[-2].lower().strip()
+        if two_back in DETERMINERS and prev in _ATTR_WORDS:
+            return "noun_anchor"
 
     # Rule 2: cur completes a multi-word spatial prep → relation_anchor
     # Must come before Rule 3 so "across [from]" doesn't mis-fire as noun_anchor

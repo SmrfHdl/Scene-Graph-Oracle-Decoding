@@ -86,7 +86,8 @@ DATASETS: dict[str, dict] = {
             "GQA images (~20 GB) must be downloaded separately:\n"
             "  https://downloads.cs.stanford.edu/nlp/data/gqa/images.zip\n"
             "  → unzip to data/gqa/images/\n"
-            "  (Only needed for pilot variant C and main eval; GT SG pilot works without images)"
+            "  Required for all pilot variants (A/B/C) — LLaVA needs real images.\n"
+            "  Use --smoke_test_image test_imgs/image.png to verify the pipeline first."
         ),
     },
 
