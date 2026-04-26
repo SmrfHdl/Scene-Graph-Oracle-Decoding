@@ -40,6 +40,7 @@ def load_llava(
     dtype: torch.dtype = torch.float16,
     device_map: str = "auto",
     load_in_4bit: bool = False,
+    max_memory: dict | None = None,
 ) -> tuple[Any, Any]:
     """Load LLaVA-1.5-7B model + processor.
 
@@ -48,6 +49,9 @@ def load_llava(
         dtype:       torch.float16 (default) or torch.bfloat16.
         device_map:  "auto" splits across available GPUs; "cuda:0" for single GPU.
         load_in_4bit: Use bitsandbytes 4-bit quantization (~7 GB, for 1× T4).
+        max_memory:  Dict telling accelerate how much memory each device has, e.g.
+                     {0: "40GiB", "cpu": "16GiB"}. Useful when accelerate
+                     cannot query GPU memory directly (CUDA driver compat issues).
 
     Returns:
         (model, processor) — both HF objects ready for inference.
@@ -58,6 +62,8 @@ def load_llava(
                 model_id, dtype, device_map, load_in_4bit)
 
     kwargs: dict = {"device_map": device_map}
+    if max_memory is not None:
+        kwargs["max_memory"] = max_memory
     if load_in_4bit:
         from transformers import BitsAndBytesConfig
         kwargs["quantization_config"] = BitsAndBytesConfig(

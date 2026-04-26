@@ -222,9 +222,14 @@ def run_pilot(args: argparse.Namespace) -> None:
 
     # Load LLaVA
     logger.info("Loading LLaVA-1.5-7B ...")
+    max_memory = None
+    if args.max_gpu_memory:
+        max_memory = {0: args.max_gpu_memory, "cpu": "32GiB"}
     model, processor = load_llava(
         model_id=args.vlm_model,
         load_in_4bit=args.load_in_4bit,
+        device_map=args.device_map,
+        max_memory=max_memory,
     )
 
     # Load RelTR for variant C
@@ -399,6 +404,11 @@ def parse_args() -> argparse.Namespace:
                    help="Resume from existing results.json in --output dir")
     p.add_argument("--smoke_test_image", default=None, metavar="PATH",
                    help="Use this image for all questions (smoke test — accuracy meaningless)")
+    p.add_argument("--device_map", default="auto",
+                   help="HF device_map for LLaVA (default: auto).")
+    p.add_argument("--max_gpu_memory", default=None, metavar="MEM",
+                   help="Tell accelerate how much GPU memory is available, e.g. '40GiB'. "
+                        "Use when accelerate cannot query GPU memory (CUDA compat issue).")
     return p.parse_args()
 
 
