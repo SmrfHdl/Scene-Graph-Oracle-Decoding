@@ -6,6 +6,71 @@ See [docs/sgod_proposal.md](docs/sgod_proposal.md) for the full architecture pro
 
 ---
 
+## Quick Start (new users)
+
+### 1. Environment
+
+```bash
+# Option A — uv (recommended for development)
+pip install uv
+uv sync
+
+# Option B — conda (required on servers with CUDA driver compat issues)
+# Use the conda env that has torch+CUDA working:
+#   conda run -n <env> python -c "import torch; print(torch.cuda.is_available())"
+# Then run scripts with:
+#   PYTHONPATH=$(pwd) conda run -n <env> python <script>
+```
+
+> **Note for shared GPU servers:** If `import torch` fails with `undefined symbol: ncclCommWindowDeregister`,
+> the installed PyTorch binary doesn't match the system CUDA driver.
+> Find a working conda env: `conda env list`, then test each with the command above.
+
+### 2. Data
+
+```bash
+# Download GQA questions + scene graphs (~600 MB) — needed for pilot
+python scripts/download_data.py --benchmarks gqa
+
+# Copy or link to /dev/shm for faster I/O (optional, useful on RAM-rich servers)
+cp data/gqa/*.json /dev/shm/gqa/
+
+# Download the 200 pilot images (~30 MB)
+python scripts/download_gqa_images.py \
+    --gqa_path data/gqa/ \
+    --num_images 200 \
+    --out_dir data/gqa/images/
+```
+
+### 3. Smoke test (5 questions, no GPU checkpoint needed)
+
+```bash
+python experiments/pilot/run_pilot.py \
+    --gqa_path data/gqa/ \
+    --smoke_test_image test_imgs/image.png \
+    --num_images 5 --no_reltr
+```
+
+Expected output: `Gate PASSED: YES ✓` (delta will be noisy at n=5).
+
+### 4. Pilot experiment (200 questions, ~5 min on RTX 4090)
+
+```bash
+python experiments/pilot/run_pilot.py \
+    --gqa_path data/gqa/ \
+    --num_images 200 --no_reltr
+```
+
+**Validated result (2026-04-27):** A=15.5%, B=47.0%, Δ=+31.5 pp — Gate PASSED ✓
+
+### 5. Run tests
+
+```bash
+pytest tests/       # unit tests (no GPU required)
+```
+
+---
+
 ## Setup
 
 ```bash
