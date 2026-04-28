@@ -39,6 +39,7 @@ class CLIPScorer:
         pretrained: str = "openai",
         device: Optional[str] = None,
         vocab_cache_path: Optional[Path | str] = None,
+        _preloaded: Optional[dict] = None,
     ):
         """
         Args:
@@ -49,49 +50,71 @@ class CLIPScorer:
             device: Torch device string; auto-detected if None.
             vocab_cache_path: Path to pre-computed vocab embeddings file
                 (produced by scripts/precompute_clip_vocab.py).
+            _preloaded: Internal — dict with keys model, preprocess, tokenizer,
+                vocab_embeddings, vocab_words to skip re-loading.
         """
         import open_clip  # deferred so unit tests can mock without loading CLIP
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model_name = model_name
 
-        logger.info("Loading CLIP %s/%s on %s", model_name, pretrained, self.device)
-        model, _, preprocess = open_clip.create_model_and_transforms(
-            model_name, pretrained=pretrained
-        )
-        self._model = model.to(self.device).eval()
-        self._tokenizer = open_clip.get_tokenizer(model_name)
+        if _preloaded is not None:
+            self._model     = _preloaded["model"]
+            self._tokenizer = _preloaded["tokenizer"]
+            preprocess      = _preloaded["preprocess"]
+            self._vocab_embeddings = _preloaded.get("vocab_embeddings")
+            self._vocab_words      = _preloaded.get("vocab_words")
+            self._vocab_index      = _preloaded.get("vocab_index")
+        else:
+            logger.info("Loading CLIP %s/%s on %s", model_name, pretrained, self.device)
+            model, _, preprocess = open_clip.create_model_and_transforms(
+                model_name, pretrained=pretrained
+            )
+            self._model = model.to(self.device).eval()
+            self._tokenizer = open_clip.get_tokenizer(model_name)
+
+            self._vocab_embeddings = None
+            self._vocab_words      = None
+            self._vocab_index      = None
+
+            if vocab_cache_path:
+                cache_path = Path(vocab_cache_path)
+                if cache_path.exists():
+                    cached = torch.load(cache_path, map_location=self.device, weights_only=True)
+                    self._vocab_embeddings = F.normalize(
+                        cached["embeddings"].to(self.device).float(), dim=-1
+                    )  # [V, D]
+                    self._vocab_words = cached["words"]
+                    self._vocab_index = {w: i for i, w in enumerate(self._vocab_words)}
+                    logger.info("Loaded vocab cache: %d words", len(self._vocab_words))
+                else:
+                    logger.warning("Vocab cache not found at %s — live encoding will be used", cache_path)
 
         with torch.no_grad():
             img_tensor = preprocess(image).unsqueeze(0).to(self.device)
             feat = self._model.encode_image(img_tensor)
             self._image_feat = F.normalize(feat, dim=-1)  # [1, D]
 
-        self._vocab_embeddings: Optional[torch.Tensor] = None
-        self._vocab_words: Optional[list[str]] = None
-        self._vocab_index: Optional[dict[str, int]] = None
-
-        if vocab_cache_path:
-            cache_path = Path(vocab_cache_path)
-            if cache_path.exists():
-                cached = torch.load(cache_path, map_location=self.device, weights_only=True)
-                self._vocab_embeddings = F.normalize(
-                    cached["embeddings"].to(self.device).float(), dim=-1
-                )  # [V, D]
-                self._vocab_words = cached["words"]
-                self._vocab_index = {w: i for i, w in enumerate(self._vocab_words)}
-                logger.info("Loaded vocab cache: %d words", len(self._vocab_words))
-            else:
-                logger.warning("Vocab cache not found at %s — live encoding will be used", cache_path)
+        # Per-image CLIP baseline: mean and std of cosine over the vocab cache.
+        # Used to z-score-center scores so "above-average for THIS image" → > 0.5
+        # and "below average" → < 0.5. Without this, raw cosine is always ~0.2-0.3
+        # for every word and the (sims+1)/2 rescale yields a uniform positive bias.
+        self._image_baseline_mean: float | None = None
+        self._image_baseline_std:  float | None = None
+        if self._vocab_embeddings is not None:
+            with torch.no_grad():
+                all_sims = (self._vocab_embeddings @ self._image_feat.T).squeeze(-1)
+            self._image_baseline_mean = float(all_sims.mean().item())
+            self._image_baseline_std  = float(all_sims.std().item())
 
     # ── Public API ───────────────────────────────────────────────────────
 
     def score_words(self, words: list[str]) -> torch.Tensor:
-        """Encode words and return cosine similarities with the image.
+        """Encode words and return calibrated similarity in [0, 1].
 
-        Returns:
-            Float tensor of shape [N] with values in [0, 1].
-            Uses vocab cache when all words are present; otherwise encodes live.
+        Uses an image-specific empirical baseline (mean+std of cosine over the
+        vocab cache) so that "above-average for this image" maps to > 0.5 and
+        "below average" maps to < 0.5. Falls back to (sims+1)/2 when no cache.
         """
         if not words:
             return torch.tensor([], dtype=torch.float32, device=self.device)
@@ -102,7 +125,7 @@ class CLIPScorer:
             if all(i is not None for i in indices):
                 cached_feats = self._vocab_embeddings[indices]  # [N, D]
                 sims = (cached_feats @ self._image_feat.T).squeeze(-1)  # [N]
-                return ((sims + 1) / 2).clamp(0.0, 1.0)
+                return self._calibrate(sims)
 
         return self._encode_and_score(words)
 
@@ -122,7 +145,20 @@ class CLIPScorer:
             tokens = self._tokenizer(words).to(self.device)
             text_feats = F.normalize(self._model.encode_text(tokens), dim=-1)  # [N, D]
         sims = (text_feats @ self._image_feat.T).squeeze(-1)  # [N]
-        return ((sims + 1) / 2).clamp(0.0, 1.0)
+        return self._calibrate(sims)
+
+    def _calibrate(self, sims: torch.Tensor) -> torch.Tensor:
+        """Map raw cosine similarities to [0, 1] with the image-specific baseline.
+
+        With baseline:  0.5 + 0.15 * (sims - mean) / max(std, 0.01), clamped.
+                        +1σ → ~0.65, +2σ → ~0.80, perfect match (~3σ) → ~0.95.
+        Without:        fallback (sims+1)/2 — same as legacy behavior.
+        """
+        if self._image_baseline_mean is None or self._image_baseline_std is None:
+            return ((sims + 1) / 2).clamp(0.0, 1.0)
+        std = max(self._image_baseline_std, 0.01)
+        z = (sims - self._image_baseline_mean) / std
+        return (0.5 + 0.15 * z).clamp(0.0, 1.0)
 
     def encode_words(self, words: list[str]) -> torch.Tensor:
         """Return normalized text embeddings for a word list.

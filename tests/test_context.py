@@ -264,17 +264,18 @@ def test_negative_answer_sequence():
     # "No, there is no cat." — oracle should be suppressed
     ctx = GenerationContext("Is there a cat?")
     assert ctx.question_type == "existential"
-    assert ctx.get_lambda() == 0.50
+    base = BASE_LAMBDA["existential"]
+    assert ctx.get_lambda() == base
 
     ctx.update("No")     # depth=1.0  → light negation
-    assert ctx.get_lambda() < 0.50
+    assert ctx.get_lambda() < base
 
     ctx.update(",")
     ctx.update("there")
     ctx.update("is")
     ctx.update("no")     # depth increases again
 
-    assert ctx.get_lambda() < 0.50   # still suppressed
+    assert ctx.get_lambda() < base   # still suppressed
 
 
 def test_positive_answer_sequence():

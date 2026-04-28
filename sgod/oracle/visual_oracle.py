@@ -25,14 +25,18 @@ if TYPE_CHECKING:
 class VisualOracle:
     """Dual-source oracle combining SGG confidence + CLIP soft similarity.
 
-    Design (Section 3.3):
-      - For noun tokens: w_sg = sg_conf, w_clip = 1 - sg_conf
-        · Token in scene graph  → w_sg * sg_conf + w_clip * clip_score
-        · Token not in graph    → w_sg * (-0.3)  + w_clip * (clip_score - 0.5)
-      - For relation tokens: +sg_conf if in graph, -0.2 otherwise
-      - For attribute tokens: +sg_conf if in graph, clip_score - 0.5 otherwise
+    All scores are CENTERED around 0 so vocab-match tokens with mid confidence
+    pass through unchanged; only high-confidence matches boost and low-confidence
+    or out-of-vocab tokens penalize. This breaks the systematic positive bias
+    that previously over-generated content and ignored adversarial cues.
 
-    Scores are in [-1, 1]:  >0 grounded → boost, <0 ungrounded → penalty, =0 neutral.
+    Design (revised):
+      - noun in graph    : (sg_conf - 0.5) blended with (clip - 0.5)  ∈ [-0.5, +0.5]
+      - noun not in graph: -0.3 + 0.6*(clip - 0.5)                    ∈ [-0.6, 0.0]
+      - relation in graph : sg_conf - 0.5                              ∈ [-0.5, +0.5]
+      - relation not      : -0.2
+      - attr in graph     : sg_conf - 0.5                              ∈ [-0.5, +0.5]
+      - attr not in graph : clip - 0.5                                 ∈ [-0.5, +0.5]
     """
 
     def __init__(self, scene_graph: SceneGraph, clip_scorer: CLIPScorer):
@@ -108,27 +112,31 @@ class VisualOracle:
 
     def _score_noun(self, token: str) -> float:
         tok = token.lower().strip()
-        sg_conf = self._noun_conf.get(tok, 0.0)
         clip_score = self.clip.score_single(tok)  # [0, 1]
-
-        w_sg = sg_conf
-        w_clip = 1.0 - sg_conf
+        clip_centered = clip_score - 0.5  # [-0.5, 0.5]
 
         if tok in self.noun_vocab:
-            return w_sg * sg_conf + w_clip * clip_score
-        # Soft penalty: SGG says absent; CLIP centered at 0
-        return w_sg * (-0.3) + w_clip * (clip_score - 0.5)
+            sg_conf = self._noun_conf[tok]
+            w_sg = sg_conf
+            w_clip = 1.0 - sg_conf
+            # Center SGG signal around 0: conf=0.5 → 0, conf=1.0 → +0.5, conf=0 → -0.5
+            sg_centered = sg_conf - 0.5
+            return w_sg * sg_centered + w_clip * clip_centered
+        # Out-of-vocab: SGG says absent → fixed penalty + CLIP signal (centered)
+        return -0.3 + 0.6 * clip_centered
 
     def _score_relation(self, token: str) -> float:
         tok = token.lower().strip()
         if tok in self.rel_vocab:
-            return self._rel_conf.get(tok, 0.5)
+            # Center: conf=0.5 → 0, conf=1.0 → +0.5
+            return self._rel_conf.get(tok, 0.5) - 0.5
         return -0.2
 
     def _score_attribute(self, token: str) -> float:
         tok = token.lower().strip()
         if tok in self.attr_vocab:
-            return self._attr_conf.get(tok, 0.5)
+            # Center: conf=0.5 → 0, conf=1.0 → +0.5
+            return self._attr_conf.get(tok, 0.5) - 0.5
         clip_score = self.clip.score_single(tok)  # [0, 1]
         return clip_score - 0.5  # centered around 0
 

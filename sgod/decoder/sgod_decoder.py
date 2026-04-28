@@ -15,6 +15,7 @@ Applies: logit_final = logit_lm + lambda * oracle_scores
 """
 from __future__ import annotations
 
+import re
 from typing import Callable
 
 import torch
@@ -23,6 +24,40 @@ from sgod.anchor import detect_anchor
 from sgod.context import BASE_LAMBDA, GenerationContext
 from sgod.decoder.token_utils import apply_oracle_scores, decode_top_k
 from sgod.oracle import VisualOracle
+
+
+# Generic referents we should not treat as SG-specific entities.
+_GENERIC_REFERENTS: frozenset[str] = frozenset({
+    "image", "photo", "picture", "scene", "background", "foreground",
+    "left", "right", "top", "bottom", "middle", "center",
+    "side", "front", "back",
+})
+
+# "the X" / "a X" / "an X" / "this X" / "that X" — captures the head noun candidate.
+_PRESUPPOSITION_RE = re.compile(
+    r"\b(?:the|a|an|this|that)\s+([a-zA-Z]+)", re.IGNORECASE
+)
+
+
+def _detect_adversarial(question: str, noun_vocab: set[str]) -> bool:
+    """Return True when the question presupposes entities absent from the scene graph.
+
+    Heuristic: extract noun heads after determiners; ignore generic referents
+    (image, photo, side, ...). If at least one specific noun is mentioned and
+    NONE of them appear in the scene graph, the oracle has nothing to confirm —
+    likely an adversarial / trick question. In that case the decoder dampens
+    the oracle so it does not amplify hallucinated descriptions of nonexistent
+    objects.
+    """
+    if not noun_vocab:
+        return False
+    candidates = [
+        c.lower() for c in _PRESUPPOSITION_RE.findall(question)
+        if c.lower() not in _GENERIC_REFERENTS
+    ]
+    if not candidates:
+        return False
+    return not any(c in noun_vocab for c in candidates)
 
 
 def _clean_token(token: str) -> str:
@@ -57,9 +92,10 @@ class SGODDecoder:
     def __init__(
         self,
         vlm_model,
-        tokenizer,
         sgg_module,
         clip_factory: Callable,
+        processor=None,
+        tokenizer=None,
         top_k: int = 50,
         min_sg_confidence: float = 0.4,
         base_lambda: dict[str, float] | None = None,
@@ -69,7 +105,8 @@ class SGODDecoder:
         temperature: float = 0.0,
     ) -> None:
         self.vlm          = vlm_model
-        self.tokenizer    = tokenizer
+        self.processor    = processor
+        self.tokenizer    = processor.tokenizer if processor is not None else tokenizer
         self.sgg          = sgg_module
         self.clip_factory = clip_factory
         self.top_k        = top_k
@@ -118,23 +155,58 @@ class SGODDecoder:
         )
         use_oracle = oracle.should_activate_oracle(self.min_sg_conf)
 
+        # Adversarial / presupposition dampening: when the question references
+        # specific nouns and none of them are in the scene graph, the oracle
+        # has nothing factual to add — treat it as a trick question and shrink
+        # lambda so we don't amplify hallucinated attributes/relations.
+        adversarial = _detect_adversarial(question, oracle.noun_vocab)
+        adversarial_scale = 0.25 if adversarial else 1.0
+
+        # Per-call instrumentation (read from outside via decoder.last_stats)
+        self.last_stats: dict = {
+            "tokens": 0,
+            "anchor_fires": 0,
+            "max_score": 0.0,
+            "min_score": 0.0,
+            "score_sum": 0.0,
+            "use_oracle": bool(use_oracle),
+            "adversarial": bool(adversarial),
+            "noun_vocab_size": len(oracle.noun_vocab),
+            "rel_vocab_size": len(oracle.rel_vocab),
+            "attr_vocab_size": len(oracle.attr_vocab),
+        }
+
         # ── Phase 2: Autoregressive decoding ────────────────────────────────
-        input_ids      = torch.tensor([self.tokenizer.encode(question)])  # [1, seq]
+        if self.processor is not None:
+            device       = next(self.vlm.parameters()).device
+            inputs       = self.processor(images=image, text=question, return_tensors="pt").to(device)
+            input_ids    = inputs["input_ids"]
+            pixel_values = inputs.get("pixel_values")
+        else:
+            input_ids    = torch.tensor([self.tokenizer.encode(question)])
+            pixel_values = None
+        device = input_ids.device
         prev_tokens:   list[str] = []
         generated_ids: list[int] = []
 
         for _ in range(max_new_tokens):
             with torch.no_grad():
-                outputs = self.vlm(input_ids=input_ids)
+                outputs = self.vlm(input_ids=input_ids, pixel_values=pixel_values)
                 logits  = outputs.logits[0, -1, :].float()  # [vocab_size]
 
             # Oracle injection — only at anchor positions when oracle is active
-            lam = ctx.get_lambda()
+            lam = ctx.get_lambda() * adversarial_scale
             if use_oracle and lam != 0.0:
                 top_k_ids, top_k_words = decode_top_k(logits, self.tokenizer, k=self.top_k)
                 oracle_scores = self._score_candidates(top_k_words, prev_tokens, oracle)
-                if oracle_scores.abs().sum().item() > 0.0:
+                score_abs_sum = oracle_scores.abs().sum().item()
+                if score_abs_sum > 0.0:
+                    self.last_stats["anchor_fires"] += 1
+                    self.last_stats["max_score"] = max(self.last_stats["max_score"], float(oracle_scores.max()))
+                    self.last_stats["min_score"] = min(self.last_stats["min_score"], float(oracle_scores.min()))
+                    self.last_stats["score_sum"] += float(oracle_scores.sum())
                     apply_oracle_scores(logits, top_k_ids, oracle_scores, lam)
+            self.last_stats["tokens"] += 1
 
             # Decode next token — greedy (temperature=0) or multinomial sampling
             if temperature == 0.0:
@@ -151,13 +223,13 @@ class SGODDecoder:
             generated_ids.append(next_id)
 
             input_ids = torch.cat(
-                [input_ids, torch.tensor([[next_id]])], dim=-1
+                [input_ids, torch.tensor([[next_id]], device=device)], dim=-1
             )
 
             if next_id == self.tokenizer.eos_token_id:
                 break
 
-        return self.tokenizer.decode(generated_ids)
+        return self.tokenizer.decode(generated_ids, skip_special_tokens=True)
 
     # ── Internal ─────────────────────────────────────────────────────────────
 

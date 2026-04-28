@@ -122,7 +122,7 @@ def eval_split(
         raise FileNotFoundError(f"{q_file} — run download_data.py --benchmarks pope")
 
     with open(q_file) as f:
-        items = json.load(f)
+        items = [json.loads(line) for line in f if line.strip()]
 
     records = []
     for i, item in enumerate(items):
@@ -152,8 +152,16 @@ def eval_split(
 
         if (i + 1) % 100 == 0:
             metrics_b = compute_pope_metrics(records, "pred_base")
-            logger.info("[%s] %d/%d  Base F1=%.3f Acc=%.3f",
-                        split, i+1, len(items), metrics_b["f1"], metrics_b["accuracy"])
+            if decoder is not None:
+                metrics_s = compute_pope_metrics(records, "pred_sgod")
+                logger.info("[%s] %d/%d  Base F1=%.3f Acc=%.3f | SGOD F1=%.3f Acc=%.3f (ΔF1=%+.3f)",
+                            split, i+1, len(items),
+                            metrics_b["f1"], metrics_b["accuracy"],
+                            metrics_s["f1"], metrics_s["accuracy"],
+                            metrics_s["f1"] - metrics_b["f1"])
+            else:
+                logger.info("[%s] %d/%d  Base F1=%.3f Acc=%.3f",
+                            split, i+1, len(items), metrics_b["f1"], metrics_b["accuracy"])
 
     save_json(records, out_dir / f"records_{split}.json")
     metrics_base = compute_pope_metrics(records, "pred_base")

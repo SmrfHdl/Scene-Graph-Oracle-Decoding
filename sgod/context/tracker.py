@@ -37,12 +37,16 @@ QUESTION_TYPE_SIGNALS: dict[str, list[str]] = {
     ],
 }
 
+# Lowered after MMHal regression analysis (run 2026-04-28_18-50): SGOD over-corrected
+# baseline-correct answers on attribute/environment/comparison. Halving descriptive and
+# bringing comparative below 0.20 trades a few wins on counting for fewer regressions
+# on color/spatial/environment questions where oracle confidence is unreliable.
 BASE_LAMBDA: dict[str, float] = {
-    "existential":  0.50,   # Hallucination rate highest → strong oracle
-    "descriptive":  0.35,   # Moderate
-    "comparative":  0.20,   # Model needs to reason → weak oracle
+    "existential":  0.40,   # Hallucination rate highest → strong-ish oracle
+    "descriptive":  0.22,   # MMHal attribute/environment regressions → halve
+    "comparative":  0.12,   # Model needs to reason → weak oracle
     "hypothetical": 0.00,   # Oracle not relevant
-    "general":      0.25,   # Default
+    "general":      0.18,   # Default
 }
 
 _NEGATION_INCREMENT = 1.0

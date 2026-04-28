@@ -3732,6 +3732,7 @@ name = "sgod"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "accelerate" },
     { name = "open-clip-torch" },
     { name = "pillow" },
     { name = "pyyaml" },
@@ -3755,6 +3756,7 @@ train = [
 
 [package.metadata]
 requires-dist = [
+    { name = "accelerate" },
     { name = "lmms-eval", marker = "extra == 'eval'" },
     { name = "open-clip-torch" },
     { name = "peft", marker = "extra == 'train'" },

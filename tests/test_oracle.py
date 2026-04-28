@@ -118,8 +118,9 @@ def test_score_noun_in_vocab_positive(oracle):
 def test_score_noun_in_vocab_formula(oracle):
     # dog: sg_conf=0.9, clip_score=0.8
     # w_sg=0.9, w_clip=0.1
-    # result = 0.9 * 0.9 + 0.1 * 0.8 = 0.81 + 0.08 = 0.89
-    expected = 0.9 * 0.9 + 0.1 * 0.8
+    # Centered: w_sg*(sg_conf-0.5) + w_clip*(clip-0.5)
+    # = 0.9*0.4 + 0.1*0.3 = 0.36 + 0.03 = 0.39
+    expected = 0.9 * (0.9 - 0.5) + 0.1 * (0.8 - 0.5)
     assert oracle.score("dog", "noun_anchor") == pytest.approx(expected, abs=1e-5)
 
 
@@ -130,29 +131,30 @@ def test_score_noun_case_insensitive(oracle):
 
 
 def test_score_noun_not_in_vocab_low_clip(oracle):
-    # zebra: clip_score=0.1, sg_conf=0
-    # w_sg=0, w_clip=1
-    # result = 0*(-0.3) + 1*(0.1 - 0.5) = -0.4
+    # zebra: clip_score=0.1, not in vocab
+    # Out-of-vocab formula: -0.3 + 0.6 * (clip - 0.5)
+    # = -0.3 + 0.6 * (-0.4) = -0.54
     s = oracle.score("zebra", "noun_anchor")
-    assert s == pytest.approx(-0.4, abs=1e-5)
+    assert s == pytest.approx(-0.3 + 0.6 * (0.1 - 0.5), abs=1e-5)
 
 
 def test_score_noun_not_in_vocab_high_clip(oracle):
-    # When CLIP score is 0.9 for some word not in vocab and sg_conf=0:
-    # result = 0*(-0.3) + 1*(0.9 - 0.5) = 0.4  → positive CLIP signal
+    # CLIP=0.9 for chair, not in vocab:
+    # -0.3 + 0.6 * (0.9 - 0.5) = -0.3 + 0.24 = -0.06
+    # (still slightly negative — out-of-vocab is structurally penalized)
     clip = MockCLIPScorer()
     clip._scores["chair"] = 0.9
     sg = SceneGraph(objects=[], relations=[], attributes=[])
     o = VisualOracle(sg, clip)
     s = o.score("chair", "noun_anchor")
-    assert s == pytest.approx(0.4, abs=1e-5)
+    assert s == pytest.approx(-0.3 + 0.6 * (0.9 - 0.5), abs=1e-5)
 
 
 # ── score() — relation_anchor ─────────────────────────────────────────────────
 
 def test_score_relation_in_vocab(oracle):
-    # "on" is in rel_vocab with conf=0.8
-    assert oracle.score("on", "relation_anchor") == pytest.approx(0.8)
+    # "on" is in rel_vocab with conf=0.8 → centered: 0.8 - 0.5 = 0.3
+    assert oracle.score("on", "relation_anchor") == pytest.approx(0.3)
 
 
 def test_score_relation_not_in_vocab(oracle):
@@ -168,8 +170,8 @@ def test_score_relation_case_insensitive(oracle):
 # ── score() — attr_anchor ─────────────────────────────────────────────────────
 
 def test_score_attribute_in_vocab(oracle):
-    # "black" with conf=0.85
-    assert oracle.score("black", "attr_anchor") == pytest.approx(0.85)
+    # "black" with conf=0.85 → centered: 0.85 - 0.5 = 0.35
+    assert oracle.score("black", "attr_anchor") == pytest.approx(0.35)
 
 
 def test_score_attribute_not_in_vocab_formula(oracle):
@@ -180,7 +182,7 @@ def test_score_attribute_not_in_vocab_formula(oracle):
 
 
 def test_score_attribute_high_clip_positive(oracle):
-    # "red": clip_score=0.8 → 0.8 - 0.5 = 0.3
+    # "red" not in attr_vocab; clip=0.8 → 0.8 - 0.5 = 0.3 (CLIP-only signal)
     clip = MockCLIPScorer()
     clip._scores["red"] = 0.8
     sg = SceneGraph(objects=[], relations=[], attributes=[])
@@ -257,9 +259,10 @@ def test_empty_scene_graph_no_crash(clip):
 def test_empty_scene_graph_scores_zero_sg(clip):
     sg = SceneGraph(objects=[], relations=[], attributes=[])
     o = VisualOracle(sg, clip)
-    # No SGG signal; CLIP dominates with score_single("unknown")=0.3 → 0 + 1*(0.3-0.5)=-0.2
+    # Out-of-vocab: -0.3 + 0.6 * (clip - 0.5)
+    # CLIP("unknown")=0.3 → -0.3 + 0.6*(-0.2) = -0.42
     s = o.score("unknown", "noun_anchor")
-    assert s == pytest.approx(0.3 - 0.5, abs=1e-5)
+    assert s == pytest.approx(-0.3 + 0.6 * (0.3 - 0.5), abs=1e-5)
 
 
 def test_duplicate_objects_max_conf(clip):
@@ -273,9 +276,9 @@ def test_duplicate_objects_max_conf(clip):
         attributes=[],
     )
     o = VisualOracle(sg, clip)
-    # sg_conf for "dog" should be 0.9
-    # score = 0.9 * 0.9 + 0.1 * 0.8 (MockCLIP dog=0.8)
-    expected = 0.9 * 0.9 + 0.1 * 0.8
+    # sg_conf for "dog" should be 0.9 → centered formula
+    # 0.9*(0.9-0.5) + 0.1*(0.8-0.5) = 0.36 + 0.03 = 0.39
+    expected = 0.9 * (0.9 - 0.5) + 0.1 * (0.8 - 0.5)
     assert o.score("dog", "noun_anchor") == pytest.approx(expected, abs=1e-5)
 
 

@@ -74,7 +74,7 @@ def _build_fixed_lambda_decoder(cfg: dict, lam: float, load_in_4bit: bool):
                                 vocab_cache_path=cfg["oracle"].get("clip_vocab_cache"))
     return SGODDecoder(
         vlm_model=model,
-        tokenizer=processor.tokenizer,
+        processor=processor,
         sgg_module=sgg,
         clip_factory=factory,
         base_lambda=fixed_bl,
@@ -97,7 +97,7 @@ def _build_no_anchor_decoder(cfg: dict, load_in_4bit: bool):
                                 vocab_cache_path=cfg["oracle"].get("clip_vocab_cache"))
 
     decoder = SGODDecoder(
-        vlm_model=model, tokenizer=processor.tokenizer,
+        vlm_model=model, processor=processor,
         sgg_module=sgg, clip_factory=factory,
         top_k=cfg["oracle"]["top_k"],
         min_sg_confidence=cfg["sgg"]["confidence_threshold"],
@@ -129,7 +129,7 @@ def _build_noun_only_decoder(cfg: dict, load_in_4bit: bool):
                                 vocab_cache_path=cfg["oracle"].get("clip_vocab_cache"))
 
     decoder = SGODDecoder(
-        vlm_model=model, tokenizer=processor.tokenizer,
+        vlm_model=model, processor=processor,
         sgg_module=sgg, clip_factory=factory,
         top_k=cfg["oracle"]["top_k"],
         min_sg_confidence=cfg["sgg"]["confidence_threshold"],

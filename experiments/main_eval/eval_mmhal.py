@@ -97,14 +97,21 @@ def fetch_image(image_src: str, cache_dir: Path, image_id: str):
     """Download image from URL or load from cache. Returns PIL.Image."""
     from PIL import Image
 
-    cache_path = cache_dir / f"{image_id}.jpg"
-    if not cache_path.exists():
-        try:
-            logger.debug("Fetching image: %s", image_src)
-            urllib.request.urlretrieve(image_src, cache_path)
-        except Exception as exc:
-            logger.warning("Could not fetch image %s: %s", image_src, exc)
-            return None
+    # Prefer filename from URL (matches pre-downloaded images), fall back to image_id
+    url_filename = image_src.rsplit("/", 1)[-1] if "/" in image_src else ""
+    for candidate in [url_filename, f"{image_id}.jpg"]:
+        if candidate:
+            p = cache_dir / candidate
+            if p.exists():
+                return Image.open(p).convert("RGB")
+
+    cache_path = cache_dir / (url_filename or f"{image_id}.jpg")
+    try:
+        logger.debug("Fetching image: %s", image_src)
+        urllib.request.urlretrieve(image_src, cache_path)
+    except Exception as exc:
+        logger.warning("Could not fetch image %s: %s", image_src, exc)
+        return None
     return Image.open(cache_path).convert("RGB")
 
 
@@ -147,9 +154,15 @@ def main() -> None:
     img_cache = data_path / "images"
     img_cache.mkdir(exist_ok=True)
 
-    q_file = data_path / "mmhal_data.json"
-    if not q_file.exists():
-        raise FileNotFoundError(f"{q_file} — run download_data.py --benchmarks mmhal")
+    # Support both original name and the actual HuggingFace filename
+    for candidate in ("mmhal_data.json", "response_template.json", "test_data.json"):
+        q_file = data_path / candidate
+        if q_file.exists():
+            break
+    else:
+        raise FileNotFoundError(
+            f"No MMHal data file found in {data_path} — expected mmhal_data.json or response_template.json"
+        )
 
     with open(q_file) as f:
         items = json.load(f)
@@ -182,9 +195,16 @@ def main() -> None:
         qtype     = item.get("question_type", "other")
 
         pred_base = run_llava(model, processor, image, question, args.max_new_tokens)
-        pred_sgod = decoder.generate(
-            image, f"USER: <image>\n{question}\nASSISTANT:"
-        ) if decoder else None
+        pred_sgod = None
+        sgod_stats: dict | None = None
+        if decoder:
+            pred_sgod = decoder.generate(
+                image, f"USER: <image>\n{question}\nASSISTANT:",
+                max_new_tokens=args.max_new_tokens,
+            )
+            sgod_stats = getattr(decoder, "last_stats", None)
+            if sgod_stats is not None:
+                sgod_stats = dict(sgod_stats)  # copy — decoder reuses the dict
 
         record: dict = {
             "image_id":    item["image_id"],
@@ -194,6 +214,8 @@ def main() -> None:
             "pred_base":   pred_base,
             "pred_sgod":   pred_sgod,
         }
+        if sgod_stats is not None:
+            record["sgod_stats"] = sgod_stats
 
         if gpt4_client:
             img_content = item.get("image_content", [])
@@ -209,6 +231,22 @@ def main() -> None:
         logger.info("[%d/%d] type=%s", i+1, len(items), qtype)
 
     save_json(records, out_dir / "records.json")
+
+    # Per-question-type instrumentation summary (works without GPT-4)
+    by_type: dict[str, dict] = {}
+    for r in records:
+        t = r.get("type", "other")
+        slot = by_type.setdefault(t, {
+            "n": 0, "anchor_fires": 0, "tokens": 0,
+            "adversarial": 0, "use_oracle": 0,
+        })
+        slot["n"] += 1
+        s = r.get("sgod_stats") or {}
+        slot["anchor_fires"] += int(s.get("anchor_fires", 0))
+        slot["tokens"]       += int(s.get("tokens", 0))
+        slot["adversarial"]  += int(bool(s.get("adversarial", False)))
+        slot["use_oracle"]   += int(bool(s.get("use_oracle", False)))
+    save_json(by_type, out_dir / "sgod_stats_by_type.json")
 
     # Compute aggregate scores
     result: dict = {"n": len(records)}

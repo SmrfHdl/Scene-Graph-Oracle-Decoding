@@ -114,19 +114,45 @@ def load_clip_factory(
 ):
     """Build a clip_factory callable for use with SGODDecoder.
 
+    Loads CLIP model once; each call to the returned factory only encodes
+    the image (no model reload).
+
     Returns:
         Callable[[PIL.Image], CLIPScorer] — pass to SGODDecoder.__init__.
     """
+    import open_clip
+    import torch
+    import torch.nn.functional as F
     from sgod.oracle import CLIPScorer
 
+    logger.info("Loading CLIP %s/%s on %s", model_name, pretrained, device)
+    model, _, preprocess = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
+    model = model.to(device).eval()
+    tokenizer = open_clip.get_tokenizer(model_name)
+
+    vocab_embeddings = vocab_words = vocab_index = None
+    if vocab_cache_path:
+        cache_path = Path(vocab_cache_path)
+        if cache_path.exists():
+            cached = torch.load(cache_path, map_location=device, weights_only=True)
+            vocab_embeddings = F.normalize(cached["embeddings"].to(device).float(), dim=-1)
+            vocab_words = cached["words"]
+            vocab_index = {w: i for i, w in enumerate(vocab_words)}
+            logger.info("Loaded vocab cache: %d words", len(vocab_words))
+        else:
+            logger.warning("Vocab cache not found at %s — live encoding will be used", cache_path)
+
+    preloaded = {
+        "model": model,
+        "preprocess": preprocess,
+        "tokenizer": tokenizer,
+        "vocab_embeddings": vocab_embeddings,
+        "vocab_words": vocab_words,
+        "vocab_index": vocab_index,
+    }
+
     def factory(image):
-        return CLIPScorer(
-            image,
-            model_name=model_name,
-            pretrained=pretrained,
-            vocab_cache_path=str(vocab_cache_path) if vocab_cache_path else None,
-            device=device,
-        )
+        return CLIPScorer(image, model_name=model_name, device=device, _preloaded=preloaded)
 
     return factory
 
@@ -177,9 +203,9 @@ def load_sgod_decoder(
 
     decoder = SGODDecoder(
         vlm_model=model,
-        tokenizer=processor.tokenizer,
         sgg_module=sgg,
         clip_factory=clip_factory,
+        processor=processor,
         top_k=top_k,
         min_sg_confidence=min_sg,
         base_lambda=base_lambda or None,

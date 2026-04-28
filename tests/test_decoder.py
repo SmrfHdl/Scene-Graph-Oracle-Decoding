@@ -34,7 +34,9 @@ class FakeTokenizer:
     def encode(self, text: str) -> list[int]:
         return [VOCAB.get(w, 99) for w in text.lower().split()]
 
-    def decode(self, ids: list[int]) -> str:
+    def decode(self, ids: list[int], skip_special_tokens: bool = False) -> str:
+        if skip_special_tokens:
+            ids = [i for i in ids if i != EOS_ID]
         return " ".join(ID2WORD.get(i, "?") for i in ids)
 
     def batch_decode(self, ids: list[int]) -> list[str]:
@@ -163,11 +165,11 @@ def test_generate_returns_string():
 
 def test_generate_stops_at_eos():
     # EOS is second token → should only generate one real token then stop
+    # skip_special_tokens=True strips EOS from the returned string.
     decoder = _make_decoder([VOCAB["dog"], EOS_ID])
     result  = decoder.generate(object(), "Is there a dog?")
     tokens  = result.strip().split()
-    assert tokens[0] == "dog"
-    assert len(tokens) == 2  # "dog" + "<eos>"
+    assert tokens == ["dog"]
 
 
 def test_generate_stops_at_max_new_tokens():
@@ -212,12 +214,10 @@ def test_oracle_applied_when_prev_is_determiner():
             logits[0, -1, EOS_ID]       = -100.0
             return _VLMOutput(logits)
 
-    # FakeCLIPScorer gives 0.5 for everything; "dog" is in the SG with conf=0.9
-    # → oracle _score_noun("dog") = 0.9*0.9 + 0.1*0.5 = 0.81 + 0.05 = 0.86
-    # → oracle _score_noun("cat") = 0.0*(-0.3) + 1.0*(0.5-0.5) = 0.0
-    # With lam=0.50 (existential): dog logit += 0.50*0.86 = +0.43
-    # Final: dog=9.43 > cat=10? No — need bigger gap or higher lambda.
-    # Use min_sg_confidence=0 and bigger SG confidence boost.
+    # FakeCLIPScorer gives 0.5 for everything; "dog" is in the SG with conf=0.99.
+    # Centered scoring: _score_noun("dog") = 0.99*(0.99-0.5) + 0.01*0 ≈ 0.485.
+    # Existential lambda is BASE_LAMBDA["existential"]; the test below uses a
+    # logit gap of only 0.1 so the boost easily flips "cat" → "dog".
     sg_high = SceneGraph(
         objects=[ObjectNode("dog", 0.99, (0,0,1,1))],
         relations=[],
