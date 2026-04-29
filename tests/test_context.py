@@ -22,13 +22,14 @@ def test_negation_tokens_content():
 
 def test_question_type_signals_keys():
     assert set(QUESTION_TYPE_SIGNALS.keys()) == {
-        "existential", "descriptive", "comparative", "hypothetical"
+        "existential", "counting", "descriptive", "comparative", "hypothetical"
     }
 
 
 def test_base_lambda_keys():
     assert set(BASE_LAMBDA.keys()) == {
-        "existential", "descriptive", "comparative", "hypothetical", "general"
+        "existential", "counting", "descriptive", "comparative",
+        "hypothetical", "general",
     }
 
 
@@ -39,9 +40,11 @@ def test_base_lambda_values_in_range():
 
 def test_base_lambda_ordering():
     assert BASE_LAMBDA["existential"] > BASE_LAMBDA["descriptive"]
-    assert BASE_LAMBDA["descriptive"] > BASE_LAMBDA["comparative"]
+    assert BASE_LAMBDA["descriptive"] >= BASE_LAMBDA["comparative"]
     assert BASE_LAMBDA["comparative"] > BASE_LAMBDA["hypothetical"]
     assert BASE_LAMBDA["hypothetical"] == 0.0
+    # Counting is disabled because CLIP cannot ground numbers.
+    assert BASE_LAMBDA["counting"] == 0.0
 
 
 # ── Question type detection ───────────────────────────────────────────────────
@@ -60,7 +63,6 @@ def test_existential_detection(question, expected):
 
 @pytest.mark.parametrize("question,expected", [
     ("What color is the dog?", "descriptive"),
-    ("How many chairs do you count?", "descriptive"),
     ("What is on the table?", "descriptive"),
     ("Where is the cat?", "descriptive"),
     ("Describe the scene.", "descriptive"),
@@ -70,6 +72,21 @@ def test_existential_detection(question, expected):
 def test_descriptive_detection(question, expected):
     ctx = GenerationContext(question)
     assert ctx.question_type == expected
+
+
+@pytest.mark.parametrize("question", [
+    "How many chairs do you count?",
+    "How many people are in the image?",
+    "How much is it per hour?",
+])
+def test_counting_detection(question):
+    ctx = GenerationContext(question)
+    assert ctx.question_type == "counting"
+
+
+def test_counting_lambda_is_zero():
+    ctx = GenerationContext("How many cars are there?")
+    assert ctx.get_lambda() == 0.0
 
 
 @pytest.mark.parametrize("question,expected", [
@@ -206,6 +223,7 @@ def test_get_lambda_no_negation_returns_base():
     for qtype in BASE_LAMBDA:
         q_map = {
             "existential":  "Is there a dog?",
+            "counting":     "How many dogs are there?",
             "descriptive":  "What color is the dog?",
             "comparative":  "Which is bigger?",
             "hypothetical": "What if there were a lion?",

@@ -130,6 +130,35 @@ class SceneGraph:
             image_size=image_size,
         )
 
+    @classmethod
+    def from_hybrid(
+        cls,
+        gd_objects: list[ObjectNode],
+        reltr_relations: list[RelationEdge],
+        image_size: Optional[tuple[int, int]] = None,
+    ) -> SceneGraph:
+        """Build a hybrid SceneGraph: open-vocab objects + RelTR relations.
+
+        Used by BG-SGOD: Grounding DINO supplies the object set (open-vocab,
+        bbox-grounded), and RelTR supplies the predicate triplets (closed-vocab
+        but well-trained). The two come from independent passes — relation
+        subject/object labels stay as RelTR predicted them, since the relation
+        scoring path keys on predicates rather than subject identity.
+
+        Args:
+            gd_objects:       Open-vocab detections from GroundingDinoModule.
+            reltr_relations:  Relation triplets from RelTR (closed predicate vocab).
+            image_size:       (width, height) of the original image.
+        """
+        objects = sorted(gd_objects, key=lambda o: o.confidence, reverse=True)
+        relations = sorted(reltr_relations, key=lambda r: r.confidence, reverse=True)
+        return cls(
+            objects=objects,
+            relations=relations,
+            attributes=[],
+            image_size=image_size,
+        )
+
     # ── Oracle Activation ────────────────────────────────────────────
 
     def should_activate_oracle(self, min_confidence: float = 0.4) -> bool:

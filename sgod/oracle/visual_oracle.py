@@ -32,11 +32,20 @@ class VisualOracle:
 
     Design (revised):
       - noun in graph    : (sg_conf - 0.5) blended with (clip - 0.5)  ∈ [-0.5, +0.5]
-      - noun not in graph: -0.3 + 0.6*(clip - 0.5)                    ∈ [-0.6, 0.0]
+      - noun not in graph: 0.3 * (clip - 0.5)                          ∈ [-0.15, +0.15]
       - relation in graph : sg_conf - 0.5                              ∈ [-0.5, +0.5]
       - relation not      : -0.2
       - attr in graph     : sg_conf - 0.5                              ∈ [-0.5, +0.5]
-      - attr not in graph : clip - 0.5                                 ∈ [-0.5, +0.5]
+      - attr not in graph : 0.3 * (clip - 0.5)                         ∈ [-0.15, +0.15]
+
+    Note: the OOV noun branch no longer applies a -0.3 bias. RelTR's 151-class
+    vocabulary excludes common answers (indoors, outdoors, kitchen, weather,
+    numbers like "two") that are not actually adversarial — only out of vocab.
+    Penalising those flipped correct LM answers on environment/counting
+    questions in the 2026-04-29 MMHal run. The OOV attribute branch is also
+    dampened because attr_vocab is empty for RelTR (no per-bbox attributes),
+    making CLIP-only color signals noisy and image-global rather than
+    object-grounded.
     """
 
     def __init__(self, scene_graph: SceneGraph, clip_scorer: CLIPScorer):
@@ -122,8 +131,9 @@ class VisualOracle:
             # Center SGG signal around 0: conf=0.5 → 0, conf=1.0 → +0.5, conf=0 → -0.5
             sg_centered = sg_conf - 0.5
             return w_sg * sg_centered + w_clip * clip_centered
-        # Out-of-vocab: SGG says absent → fixed penalty + CLIP signal (centered)
-        return -0.3 + 0.6 * clip_centered
+        # Out-of-vocab: RelTR's 151-class vocab is small, so absence ≠ "not in image".
+        # Use a weak CLIP-only signal with no penalty bias.
+        return 0.3 * clip_centered
 
     def _score_relation(self, token: str) -> float:
         tok = token.lower().strip()
@@ -137,8 +147,10 @@ class VisualOracle:
         if tok in self.attr_vocab:
             # Center: conf=0.5 → 0, conf=1.0 → +0.5
             return self._attr_conf.get(tok, 0.5) - 0.5
+        # CLIP image-level cannot disambiguate "yellow pillow" vs "blue couch" —
+        # weak fallback so it does not flip correct LM color answers.
         clip_score = self.clip.score_single(tok)  # [0, 1]
-        return clip_score - 0.5  # centered around 0
+        return 0.3 * (clip_score - 0.5)
 
 
 # ── Module-level helper ──────────────────────────────────────────────────

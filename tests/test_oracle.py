@@ -132,22 +132,20 @@ def test_score_noun_case_insensitive(oracle):
 
 def test_score_noun_not_in_vocab_low_clip(oracle):
     # zebra: clip_score=0.1, not in vocab
-    # Out-of-vocab formula: -0.3 + 0.6 * (clip - 0.5)
-    # = -0.3 + 0.6 * (-0.4) = -0.54
+    # Out-of-vocab formula: 0.3 * (clip - 0.5) = 0.3 * -0.4 = -0.12
     s = oracle.score("zebra", "noun_anchor")
-    assert s == pytest.approx(-0.3 + 0.6 * (0.1 - 0.5), abs=1e-5)
+    assert s == pytest.approx(0.3 * (0.1 - 0.5), abs=1e-5)
 
 
 def test_score_noun_not_in_vocab_high_clip(oracle):
     # CLIP=0.9 for chair, not in vocab:
-    # -0.3 + 0.6 * (0.9 - 0.5) = -0.3 + 0.24 = -0.06
-    # (still slightly negative — out-of-vocab is structurally penalized)
+    # 0.3 * (0.9 - 0.5) = 0.12 (mildly positive — no structural penalty)
     clip = MockCLIPScorer()
     clip._scores["chair"] = 0.9
     sg = SceneGraph(objects=[], relations=[], attributes=[])
     o = VisualOracle(sg, clip)
     s = o.score("chair", "noun_anchor")
-    assert s == pytest.approx(-0.3 + 0.6 * (0.9 - 0.5), abs=1e-5)
+    assert s == pytest.approx(0.3 * (0.9 - 0.5), abs=1e-5)
 
 
 # ── score() — relation_anchor ─────────────────────────────────────────────────
@@ -176,18 +174,18 @@ def test_score_attribute_in_vocab(oracle):
 
 def test_score_attribute_not_in_vocab_formula(oracle):
     # "brown" not in attr_vocab; clip score for unknown = 0.3
-    # result = 0.3 - 0.5 = -0.2
+    # result = 0.3 * (0.3 - 0.5) = -0.06 (dampened CLIP-only fallback)
     s = oracle.score("brown", "attr_anchor")
-    assert s == pytest.approx(0.3 - 0.5, abs=1e-5)
+    assert s == pytest.approx(0.3 * (0.3 - 0.5), abs=1e-5)
 
 
 def test_score_attribute_high_clip_positive(oracle):
-    # "red" not in attr_vocab; clip=0.8 → 0.8 - 0.5 = 0.3 (CLIP-only signal)
+    # "red" not in attr_vocab; clip=0.8 → 0.3 * (0.8 - 0.5) = 0.09 (dampened)
     clip = MockCLIPScorer()
     clip._scores["red"] = 0.8
     sg = SceneGraph(objects=[], relations=[], attributes=[])
     o = VisualOracle(sg, clip)
-    assert o.score("red", "attr_anchor") == pytest.approx(0.3, abs=1e-5)
+    assert o.score("red", "attr_anchor") == pytest.approx(0.3 * 0.3, abs=1e-5)
 
 
 # ── batch_score() ─────────────────────────────────────────────────────────────
@@ -259,10 +257,10 @@ def test_empty_scene_graph_no_crash(clip):
 def test_empty_scene_graph_scores_zero_sg(clip):
     sg = SceneGraph(objects=[], relations=[], attributes=[])
     o = VisualOracle(sg, clip)
-    # Out-of-vocab: -0.3 + 0.6 * (clip - 0.5)
-    # CLIP("unknown")=0.3 → -0.3 + 0.6*(-0.2) = -0.42
+    # Out-of-vocab: 0.3 * (clip - 0.5)
+    # CLIP("unknown")=0.3 → 0.3 * -0.2 = -0.06
     s = o.score("unknown", "noun_anchor")
-    assert s == pytest.approx(-0.3 + 0.6 * (0.3 - 0.5), abs=1e-5)
+    assert s == pytest.approx(0.3 * (0.3 - 0.5), abs=1e-5)
 
 
 def test_duplicate_objects_max_conf(clip):

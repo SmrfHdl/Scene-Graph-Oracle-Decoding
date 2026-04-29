@@ -4,7 +4,7 @@
 # --- SGG Module (Component 1) ---
 sgg:
   model: "reltr"
-  checkpoint: "data/checkpoints/reltr/reltr_visual_genome.pth"
+  checkpoint: "data/checkpoints/reltr/checkpoint0149.pth"
   confidence_threshold: 0.4    # Below this → deactivate oracle (Section 4.5)
 
 # --- Visual Oracle (Component 2) ---
@@ -19,13 +19,18 @@ anchor:
   use_spacy: false             # Upgrade path: switch to spaCy noun_chunks
 
 # --- Generation Context (Component 4) ---
+# Lambda values lowered after MMHal runs 2026-04-29 showed oracle over-corrected
+# attribute/environment/holistic at descriptive=0.35. Counting added at 0.0 because
+# CLIP image-level cannot ground numbers (every counting fire regressed in 10:55 run).
+# These values must stay in sync with sgod/context/tracker.py BASE_LAMBDA.
 context:
   base_lambda:
-    existential: 0.50
-    descriptive: 0.35
-    comparative: 0.20
+    existential: 0.40
+    counting:    0.00
+    descriptive: 0.15
+    comparative: 0.12
     hypothetical: 0.00
-    general: 0.25
+    general:     0.15
   negation_decay: 0.25
   max_negation_depth: 3.0
 

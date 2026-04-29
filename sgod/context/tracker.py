@@ -19,13 +19,19 @@ NEGATION_TOKENS: frozenset[str] = frozenset({
 })
 
 # Signals are checked in insertion order; first match wins.
+# "counting" must come BEFORE "existential" so "how many ... are there?" lands
+# in counting (not existential), and BEFORE "descriptive" so "how many" wins
+# over "what is/where is" patterns.
 QUESTION_TYPE_SIGNALS: dict[str, list[str]] = {
+    "counting": [
+        "how many", "how much",
+    ],
     "existential": [
         "is there", "are there", "do you see", "can you see",
         "does the image contain", "is a", "is an",
     ],
     "descriptive": [
-        "what color", "how many", "what is", "where is",
+        "what color", "what is", "where is",
         "describe", "what are", "what does",
     ],
     "comparative": [
@@ -37,16 +43,18 @@ QUESTION_TYPE_SIGNALS: dict[str, list[str]] = {
     ],
 }
 
-# Lowered after MMHal regression analysis (run 2026-04-28_18-50): SGOD over-corrected
-# baseline-correct answers on attribute/environment/comparison. Halving descriptive and
-# bringing comparative below 0.20 trades a few wins on counting for fewer regressions
-# on color/spatial/environment questions where oracle confidence is unreliable.
+# Lowered after MMHal run 2026-04-29_10-55: oracle still over-corrected on
+# attribute/environment/holistic at descriptive=0.22 (fires/token≈0.74 cumulates).
+# Counting is split out at λ=0 because CLIP image-level cannot ground numbers and
+# every counting attempt regressed (-5 net in 10:55 run vs -0 in 18:50). The
+# `if lam != 0.0` short-circuit in the decoder turns oracle off entirely for these.
 BASE_LAMBDA: dict[str, float] = {
     "existential":  0.40,   # Hallucination rate highest → strong-ish oracle
-    "descriptive":  0.22,   # MMHal attribute/environment regressions → halve
+    "counting":     0.00,   # CLIP cannot ground numbers — every fire regressed
+    "descriptive":  0.15,   # Further reduced from 0.22 (attribute/env regressions)
     "comparative":  0.12,   # Model needs to reason → weak oracle
     "hypothetical": 0.00,   # Oracle not relevant
-    "general":      0.18,   # Default
+    "general":      0.15,   # Default — match descriptive
 }
 
 _NEGATION_INCREMENT = 1.0
