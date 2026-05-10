@@ -135,6 +135,35 @@ def load_grounding_dino(model_id: str = "IDEA-Research/grounding-dino-base", dev
     return processor, model
 
 
+def _split_fused(label: str, vocab_set: set[str]) -> list[str]:
+    """Split a Grounding DINO label into its constituent vocab terms.
+
+    GD sometimes returns a single label spanning adjacent ". "-joined queries
+    (e.g. "road street" or "armchair bench chair"). We greedy-longest-match
+    against ``vocab_set`` so multi-word entries ("fire truck") survive.
+    """
+    lab = label.strip().lower()
+    if not lab:
+        return []
+    if lab in vocab_set:
+        return [lab]
+    words = lab.split()
+    terms: list[str] = []
+    i = 0
+    while i < len(words):
+        matched = False
+        for span in range(min(len(words) - i, 4), 0, -1):
+            cand = " ".join(words[i:i + span])
+            if cand in vocab_set:
+                terms.append(cand)
+                i += span
+                matched = True
+                break
+        if not matched:
+            i += 1
+    return terms or [lab]
+
+
 @torch.no_grad()
 def detect(processor, model, image: Image.Image, vocab: list[str],
            box_threshold: float = 0.25, text_threshold: float = 0.2,
@@ -143,9 +172,11 @@ def detect(processor, model, image: Image.Image, vocab: list[str],
 
     Grounding DINO requires queries joined by ". " and lowercased.
     Long vocabs (>200 tokens) hit the text-encoder limit; we chunk.
+    Fused labels ("road street") are split back into individual vocab terms.
     """
     detections: list[tuple[str, float]] = []
     chunk_size = 80  # heuristic — keeps concatenated text under encoder limit
+    vocab_set = {v.lower() for v in vocab}
 
     for chunk_start in range(0, len(vocab), chunk_size):
         chunk = vocab[chunk_start:chunk_start + chunk_size]
@@ -162,9 +193,8 @@ def detect(processor, model, image: Image.Image, vocab: list[str],
         )[0]
 
         for label, score in zip(results["labels"], results["scores"]):
-            label = label.strip().lower()
-            if label:
-                detections.append((label, float(score)))
+            for term in _split_fused(label, vocab_set):
+                detections.append((term, float(score)))
 
     # Dedup by label, keep max score.
     best: dict[str, float] = {}

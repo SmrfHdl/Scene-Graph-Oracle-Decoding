@@ -1,4 +1,6 @@
 """Tests for Visual Oracle — scoring logic, dual-source weighting, batch_score."""
+from __future__ import annotations
+
 import pytest
 import torch
 
@@ -321,3 +323,137 @@ def test_activate_oracle_custom_threshold(sample_sg, clip):
 def test_activate_oracle_delegates_to_scene_graph(sample_sg, clip):
     o = VisualOracle(sample_sg, clip)
     assert o.should_activate_oracle() == sample_sg.should_activate_oracle()
+
+
+# ── Bbox-conditioned attribute scoring (M1.5) ────────────────────────────────
+
+
+class MockBboxScorer:
+    """Stand-in for BboxClipScorer.
+
+    Records calls and returns canned scores keyed by token. Tests use this
+    to verify that VisualOracle routes through the bbox path when targets
+    resolve, and falls back to image-global CLIP otherwise.
+    """
+    def __init__(self, scores: dict[str, float] | None = None):
+        self._scores = scores or {}
+        self.calls: list[tuple[str, list]] = []
+
+    def score_token_max_across_bboxes(self, token: str, bboxes: list) -> float:
+        self.calls.append((token, list(bboxes)))
+        return self._scores.get(token.lower(), 0.5)
+
+
+def test_oracle_without_bbox_scorer_uses_image_global(sample_sg, clip):
+    # No bbox_scorer passed → existing behavior; OOV attr uses 0.3 * (clip-0.5).
+    o = VisualOracle(sample_sg, clip)
+    assert o._target_bboxes == []
+    # MockCLIPScorer returns 0.3 for unknown words.
+    s = o.score("brown", "attr_anchor")
+    assert s == pytest.approx(0.3 * (0.3 - 0.5), abs=1e-5)
+
+
+def test_oracle_resolves_question_targets(sample_sg, clip):
+    bbox_scorer = MockBboxScorer()
+    o = VisualOracle(sample_sg, clip, bbox_scorer=bbox_scorer,
+                     question="What color is the dog?")
+    # parse_targets("What color is the dog?") → ["dog"]; matches noun_vocab.
+    assert o._target_bboxes == [(10, 10, 50, 50)]
+
+
+def test_oracle_resolves_multi_target_question(sample_sg, clip):
+    bbox_scorer = MockBboxScorer()
+    o = VisualOracle(sample_sg, clip, bbox_scorer=bbox_scorer,
+                     question="Is the dog on the table?")
+    # Expect bboxes of both "dog" and "table".
+    assert (10, 10, 50, 50) in o._target_bboxes
+    assert (60, 60, 120, 120) in o._target_bboxes
+
+
+def test_oracle_no_target_match_falls_back(sample_sg, clip):
+    bbox_scorer = MockBboxScorer({"yellow": 0.9})
+    # Question target "pillow" not in noun_vocab → no bboxes resolved.
+    o = VisualOracle(sample_sg, clip, bbox_scorer=bbox_scorer,
+                     question="What color is the pillow?")
+    assert o._target_bboxes == []
+    # Falls back to image-global CLIP path.
+    s = o.score("yellow", "attr_anchor")
+    expected = 0.3 * (clip.score_single("yellow") - 0.5)
+    assert s == pytest.approx(expected, abs=1e-5)
+    # Bbox scorer must NOT have been called.
+    assert bbox_scorer.calls == []
+
+
+def test_oracle_routes_oov_attr_through_bbox_path(sample_sg, clip):
+    bbox_scorer = MockBboxScorer({"yellow": 0.9})
+    o = VisualOracle(sample_sg, clip, bbox_scorer=bbox_scorer,
+                     question="What color is the dog?")
+    s = o.score("yellow", "attr_anchor")
+    # "yellow" not in attr_vocab → bbox path; weight 0.6.
+    assert s == pytest.approx(0.6 * (0.9 - 0.5), abs=1e-5)
+    # Bbox scorer was called once with the dog bbox.
+    assert len(bbox_scorer.calls) == 1
+    token, bboxes = bbox_scorer.calls[0]
+    assert token == "yellow"
+    assert bboxes == [(10, 10, 50, 50)]
+
+
+def test_oracle_in_vocab_attr_skips_bbox_path(sample_sg, clip):
+    bbox_scorer = MockBboxScorer({"black": 0.9})
+    o = VisualOracle(sample_sg, clip, bbox_scorer=bbox_scorer,
+                     question="What color is the dog?")
+    # "black" IS in attr_vocab → use SG confidence (0.85), bbox path untouched.
+    s = o.score("black", "attr_anchor")
+    assert s == pytest.approx(0.85 - 0.5, abs=1e-5)
+    assert bbox_scorer.calls == []
+
+
+def test_oracle_bbox_path_respects_max_across_targets(sample_sg, clip):
+    # Two-target question — verify max-aggregation flows through.
+    bbox_scorer = MockBboxScorer({"wooden": 0.8})  # bbox max returns 0.8
+    o = VisualOracle(sample_sg, clip, bbox_scorer=bbox_scorer,
+                     question="Is the dog on the table?")
+    s = o.score("wooden", "attr_anchor")
+    assert s == pytest.approx(0.6 * (0.8 - 0.5), abs=1e-5)
+    # One bbox-scorer call, with both target bboxes passed as the candidate set.
+    assert len(bbox_scorer.calls) == 1
+    _, bboxes = bbox_scorer.calls[0]
+    assert (10, 10, 50, 50) in bboxes
+    assert (60, 60, 120, 120) in bboxes
+
+
+def test_oracle_question_without_bbox_scorer_does_not_resolve(sample_sg, clip):
+    # Defensive: passing question but no bbox_scorer → no resolution attempted.
+    o = VisualOracle(sample_sg, clip, question="What color is the dog?")
+    assert o._target_bboxes == []
+
+
+def test_oracle_bbox_multiplier_scales_score(sample_sg, clip):
+    # Direction-test mechanism: bbox_score_multiplier should scale the bbox path
+    # output linearly so we can deliberately overshoot conservative defaults.
+    bs1 = MockBboxScorer({"yellow": 0.9})
+    bs2 = MockBboxScorer({"yellow": 0.9})
+    o1 = VisualOracle(sample_sg, clip, bbox_scorer=bs1,
+                      question="What color is the dog?",
+                      bbox_score_multiplier=1.0)
+    o2 = VisualOracle(sample_sg, clip, bbox_scorer=bs2,
+                      question="What color is the dog?",
+                      bbox_score_multiplier=5.0)
+    s1 = o1.score("yellow", "attr_anchor")
+    s2 = o2.score("yellow", "attr_anchor")
+    assert s2 == pytest.approx(5.0 * s1, abs=1e-5)
+
+
+def test_oracle_has_bbox_target_property(sample_sg, clip):
+    # No bbox scorer → False
+    o0 = VisualOracle(sample_sg, clip)
+    assert o0.has_bbox_target is False
+    # Bbox scorer + question that resolves → True
+    bs = MockBboxScorer()
+    o1 = VisualOracle(sample_sg, clip, bbox_scorer=bs,
+                      question="What color is the dog?")
+    assert o1.has_bbox_target is True
+    # Bbox scorer + question that does NOT resolve → False
+    o2 = VisualOracle(sample_sg, clip, bbox_scorer=bs,
+                      question="What color is the pillow?")  # no "pillow" in vocab
+    assert o2.has_bbox_target is False

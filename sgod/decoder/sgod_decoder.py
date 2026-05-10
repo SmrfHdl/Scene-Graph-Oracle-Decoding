@@ -24,6 +24,7 @@ from sgod.anchor import detect_anchor
 from sgod.context import BASE_LAMBDA, GenerationContext
 from sgod.decoder.token_utils import apply_oracle_scores, decode_top_k
 from sgod.oracle import VisualOracle
+from sgod.oracle.question_parser import is_yesno_question
 
 
 # Generic referents we should not treat as SG-specific entities.
@@ -103,6 +104,11 @@ class SGODDecoder:
         max_negation_depth: float = 3.0,
         max_new_tokens: int = 256,
         temperature: float = 0.0,
+        enable_bbox_oracle: bool = False,
+        bbox_pad_ratio: float = 0.15,
+        bbox_score_multiplier: float = 1.0,
+        flip_log_cap: int = 200,
+        yesno_lambda: float = 0.0,
     ) -> None:
         self.vlm          = vlm_model
         self.processor    = processor
@@ -116,6 +122,19 @@ class SGODDecoder:
         self.max_negation_depth  = max_negation_depth
         self.max_new_tokens      = max_new_tokens
         self.temperature         = temperature
+        # M1.5 BG-SGOD: when on, build a BboxClipScorer per image and pass the
+        # question into VisualOracle so attribute scoring can be bbox-conditioned.
+        self.enable_bbox_oracle  = enable_bbox_oracle
+        self.bbox_pad_ratio      = bbox_pad_ratio
+        self.bbox_score_multiplier = bbox_score_multiplier
+        self.flip_log_cap        = flip_log_cap
+        self.yesno_lambda        = yesno_lambda
+        # Pre-compute the set of token IDs that decode to "yes" or "no"
+        # (across capitalisation + leading-space variants the LLaMA tokenizer
+        # produces). The yes/no oracle injection adds yesno_lambda directly
+        # to these positions on the first generated token of binary questions.
+        self._yes_ids, self._no_ids = self._collect_yesno_ids(self.tokenizer) \
+            if (self.tokenizer is not None and yesno_lambda > 0) else ([], [])
 
     # ── Public API ───────────────────────────────────────────────────────────
 
@@ -146,7 +165,20 @@ class SGODDecoder:
         # ── Phase 1: One-time oracle construction ───────────────────────────
         sg         = self.sgg.extract(image)
         clip       = self.clip_factory(image)
-        oracle     = VisualOracle(sg, clip)
+        bbox_scorer = None
+        if self.enable_bbox_oracle:
+            from sgod.oracle import BboxClipScorer
+            bbox_scorer = BboxClipScorer(
+                image,
+                pad_ratio=self.bbox_pad_ratio,
+                _preloaded=clip.to_preloaded(),
+            )
+        oracle     = VisualOracle(
+            sg, clip,
+            bbox_scorer=bbox_scorer,
+            question=question if self.enable_bbox_oracle else None,
+            bbox_score_multiplier=self.bbox_score_multiplier,
+        )
         ctx        = GenerationContext(
             question,
             base_lambda=self.base_lambda,
@@ -174,6 +206,21 @@ class SGODDecoder:
             "noun_vocab_size": len(oracle.noun_vocab),
             "rel_vocab_size": len(oracle.rel_vocab),
             "attr_vocab_size": len(oracle.attr_vocab),
+            "bbox_oracle_enabled": bool(self.enable_bbox_oracle),
+            "n_target_bboxes": len(oracle._target_bboxes),
+            "bbox_score_multiplier": float(self.bbox_score_multiplier),
+            "yesno_fired": False,
+            "yesno_pushed": None,         # "yes" / "no" / None
+            "yesno_top1_before": None,
+            "yesno_top1_after": None,
+            # Per-flip diagnostic: each entry is one decoding step where the
+            # oracle's injection changed the greedy argmax. Capped at
+            # flip_log_cap to keep records.json compact. Used to direction-
+            # check the oracle: when a flip happens, do we move toward GT or
+            # away? See offline analysis after MMHal.
+            "flips": [],
+            "n_flips": 0,
+            "n_flip_anchor_attempts": 0,
         }
 
         # ── Phase 2: Autoregressive decoding ────────────────────────────────
@@ -189,10 +236,54 @@ class SGODDecoder:
         prev_tokens:   list[str] = []
         generated_ids: list[int] = []
 
+        # Yes/no questions need a different injection point: anchor detector
+        # treats "yes"/"no" as neutral, so the soft-additive path never fires
+        # at the decision token. Instead we inject directly on the FIRST
+        # generated token when the question is binary and the bbox oracle has
+        # a verdict (target detected → push yes; target absent → push no).
+        do_yesno = (
+            self.yesno_lambda > 0.0
+            and use_oracle
+            and bool(self._yes_ids)
+            and bool(self._no_ids)
+            and is_yesno_question(question)
+        )
+
         for _ in range(max_new_tokens):
             with torch.no_grad():
                 outputs = self.vlm(input_ids=input_ids, pixel_values=pixel_values)
                 logits  = outputs.logits[0, -1, :].float()  # [vocab_size]
+
+            # Yes/no oracle injection — first generated token only, binary
+            # questions only. Anchor detector treats "yes"/"no" as neutral,
+            # so soft-additive scoring never fires here under normal
+            # conditions; this block routes the bbox-oracle's verdict
+            # straight onto the yes/no logit positions.
+            if do_yesno and len(generated_ids) == 0:
+                pre_top1_id = int(torch.argmax(logits).item())
+                pre_top1_word = self.tokenizer.decode([pre_top1_id]).strip()
+                yes_t = torch.tensor(self._yes_ids, device=logits.device, dtype=torch.long)
+                no_t  = torch.tensor(self._no_ids,  device=logits.device, dtype=torch.long)
+                if oracle.has_bbox_target:
+                    # Pipeline detected the target → answer is most likely "yes".
+                    # Direction signal from POPE spike: P(yes|match)=0.89.
+                    logits[yes_t] = logits[yes_t] + self.yesno_lambda
+                    logits[no_t]  = logits[no_t]  - self.yesno_lambda
+                    pushed = "yes"
+                else:
+                    # Pipeline didn't detect target → most no-cases land here
+                    # (P(no_match|no)=0.95) but ~60% of yes-cases also land
+                    # here due to limited GD recall. Pushing "no" here counts
+                    # on baseline LLaVA's known yes-bias getting flipped to
+                    # the right answer on adversarial cases.
+                    logits[yes_t] = logits[yes_t] - self.yesno_lambda
+                    logits[no_t]  = logits[no_t]  + self.yesno_lambda
+                    pushed = "no"
+                post_top1_id = int(torch.argmax(logits).item())
+                self.last_stats["yesno_fired"] = True
+                self.last_stats["yesno_pushed"] = pushed
+                self.last_stats["yesno_top1_before"] = pre_top1_word
+                self.last_stats["yesno_top1_after"]  = self.tokenizer.decode([post_top1_id]).strip()
 
             # Oracle injection — only at anchor positions when oracle is active
             lam = ctx.get_lambda() * adversarial_scale
@@ -205,7 +296,38 @@ class SGODDecoder:
                     self.last_stats["max_score"] = max(self.last_stats["max_score"], float(oracle_scores.max()))
                     self.last_stats["min_score"] = min(self.last_stats["min_score"], float(oracle_scores.min()))
                     self.last_stats["score_sum"] += float(oracle_scores.sum())
+                    # Capture pre-injection top-1 so we can detect flips. Greedy
+                    # only — under sampling the "argmax" is not what gets emitted.
+                    pre_top1_id = int(top_k_ids[0].item())
+                    pre_top1_word = top_k_words[0]
+                    self.last_stats["n_flip_anchor_attempts"] += 1
                     apply_oracle_scores(logits, top_k_ids, oracle_scores, lam)
+                    if temperature == 0.0:
+                        post_top1_id = int(torch.argmax(logits).item())
+                        if post_top1_id != pre_top1_id:
+                            self.last_stats["n_flips"] += 1
+                            if len(self.last_stats["flips"]) < self.flip_log_cap:
+                                # Find the new top-1's score within top_k (if it
+                                # was even a candidate) — useful for analysis.
+                                try:
+                                    new_idx = int((top_k_ids == post_top1_id).nonzero()[0].item())
+                                    new_word = top_k_words[new_idx]
+                                    new_oracle_score = float(oracle_scores[new_idx].item())
+                                except (IndexError, RuntimeError):
+                                    new_word = self.tokenizer.decode([post_top1_id]).strip()
+                                    new_oracle_score = 0.0
+                                self.last_stats["flips"].append({
+                                    "step": self.last_stats["tokens"],
+                                    "anchor_attempt_idx": self.last_stats["n_flip_anchor_attempts"],
+                                    "old_top1": pre_top1_word,
+                                    "new_top1": new_word,
+                                    "old_oracle_score": float(oracle_scores[0].item()),
+                                    "new_oracle_score": new_oracle_score,
+                                    "lam": float(lam),
+                                    "n_target_bboxes": len(oracle._target_bboxes),
+                                    "has_bbox_target": bool(oracle.has_bbox_target),
+                                    "prev5_tokens": prev_tokens[-5:],
+                                })
             self.last_stats["tokens"] += 1
 
             # Decode next token — greedy (temperature=0) or multinomial sampling
@@ -232,6 +354,37 @@ class SGODDecoder:
         return self.tokenizer.decode(generated_ids, skip_special_tokens=True)
 
     # ── Internal ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _collect_yesno_ids(tokenizer) -> tuple[list[int], list[int]]:
+        """Find every token id whose decoded form is "yes" or "no".
+
+        LLaMA's BPE produces several variants per word (capitalised, leading-
+        space prefixed via the ▁ marker, etc.). The injection needs to lift
+        ALL of them so the argmax can land on any of these candidates.
+
+        Returns ``(yes_ids, no_ids)``. Empty lists if the tokenizer cannot
+        be enumerated (mocks/tests).
+        """
+        try:
+            vocab_size = len(tokenizer)
+        except TypeError:
+            try:
+                vocab_size = tokenizer.vocab_size
+            except AttributeError:
+                return [], []
+        yes_ids: list[int] = []
+        no_ids:  list[int] = []
+        for tid in range(vocab_size):
+            try:
+                surface = tokenizer.decode([tid]).strip().lower()
+            except Exception:
+                continue
+            if surface == "yes":
+                yes_ids.append(tid)
+            elif surface == "no":
+                no_ids.append(tid)
+        return yes_ids, no_ids
 
     @staticmethod
     def _score_candidates(

@@ -119,6 +119,52 @@ class GroundingDinoModule:
             ". ".join(self.vocab[i:i + self._CHUNK_SIZE]) + "."
             for i in range(0, len(self.vocab), self._CHUNK_SIZE)
         ]
+        # Lowercase vocab as a set for O(1) label-membership tests during fusion split.
+        self._vocab_set: set[str] = {v.lower() for v in self.vocab}
+
+    def _split_label(self, label: str) -> list[str]:
+        """Split a Grounding DINO label into vocab terms.
+
+        GD's processor sometimes returns a single ``label`` that is the
+        concatenation of *adjacent* vocab queries (e.g. our ``". "``-joined
+        prompt yields detections labelled ``"road street"`` or
+        ``"armchair bench chair"`` when the model attends to a span covering
+        multiple terms). We want each underlying vocab term back so that
+        downstream target matching (``match_targets_to_vocab``) can hit them
+        individually.
+
+        Resolution order:
+          1. label is exactly a vocab entry (incl. multi-word like "fire truck")
+             → keep as one term.
+          2. else, split on whitespace and keep tokens that are vocab entries;
+             also try to recover multi-word vocab entries that span 2+ tokens
+             (so "fire truck van" yields ["fire truck", "van"]).
+          3. fallback: return the original label so we never lose a detection.
+        """
+        lab = label.strip().lower()
+        if not lab:
+            return []
+        if lab in self._vocab_set:
+            return [lab]
+
+        words = lab.split()
+        terms: list[str] = []
+        i = 0
+        # Greedy longest-match against vocab so multi-word entries win over their tokens.
+        while i < len(words):
+            matched = False
+            for span in range(min(len(words) - i, 4), 0, -1):
+                cand = " ".join(words[i:i + span])
+                if cand in self._vocab_set:
+                    terms.append(cand)
+                    i += span
+                    matched = True
+                    break
+            if not matched:
+                i += 1  # token isn't a vocab entry — skip it
+        if terms:
+            return terms
+        return [lab]  # nothing matched — preserve original
 
     @torch.no_grad()
     def detect(self, image: Image.Image) -> list[ObjectNode]:
@@ -145,15 +191,18 @@ class GroundingDinoModule:
             for box, score, label in zip(
                 results["boxes"], results["scores"], results["labels"]
             ):
-                label = label.strip().lower()
-                if not label:
+                terms = self._split_label(label)
+                if not terms:
                     continue
                 x1, y1, x2, y2 = (float(v) for v in box.tolist())
-                all_dets.append(ObjectNode(
-                    label=label,
-                    confidence=float(score),
-                    bbox=(x1, y1, x2, y2),
-                ))
+                # Fused-label split: emit one ObjectNode per recovered vocab
+                # term, all sharing the same bbox/score.
+                for term in terms:
+                    all_dets.append(ObjectNode(
+                        label=term,
+                        confidence=float(score),
+                        bbox=(x1, y1, x2, y2),
+                    ))
 
         # Dedup by (label, rounded-bbox) — Grounding DINO sometimes returns
         # near-duplicate boxes for the same concept. Keep highest confidence.

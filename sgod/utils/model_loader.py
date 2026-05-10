@@ -86,20 +86,41 @@ def load_llava(
 def load_sgg(
     checkpoint: str | Path,
     device: str = "cuda",
+    use_grounding_dino: bool = False,
+    grounding_dino_model: str = "IDEA-Research/grounding-dino-base",
+    grounding_dino_box_threshold: float = 0.25,
+    grounding_dino_text_threshold: float = 0.2,
 ) -> Any:
-    """Load a SGGModule backed by RelTR.
+    """Load a SGGModule backed by RelTR (and optionally Grounding DINO).
 
     Args:
-        checkpoint: Path to RelTR .pth checkpoint.
-        device:     Torch device string.
+        checkpoint:                       Path to RelTR .pth checkpoint.
+        device:                           Torch device string.
+        use_grounding_dino:               If True, build GroundingDinoModule
+                                          and pass it to SGGModule for hybrid
+                                          (open-vocab objects + RelTR relations).
+        grounding_dino_model:             HF model id for Grounding DINO.
+        grounding_dino_box_threshold:     Detection box confidence threshold.
+        grounding_dino_text_threshold:    Text-alignment threshold.
 
     Returns:
         SGGModule instance with .extract(image) -> SceneGraph.
     """
     from sgod.sgg import SGGModule
 
-    logger.info("Loading SGGModule from %s on %s", checkpoint, device)
-    module = SGGModule(str(checkpoint), device=device)
+    gd_module = None
+    if use_grounding_dino:
+        from sgod.sgg.grounding_dino_module import GroundingDinoModule
+        gd_module = GroundingDinoModule(
+            model_id=grounding_dino_model,
+            device=device,
+            box_threshold=grounding_dino_box_threshold,
+            text_threshold=grounding_dino_text_threshold,
+        )
+
+    logger.info("Loading SGGModule from %s on %s (gd=%s)",
+                checkpoint, device, bool(gd_module))
+    module = SGGModule(str(checkpoint), device=device, gd_module=gd_module)
     logger.info("SGGModule loaded.")
     return module
 
@@ -184,6 +205,10 @@ def load_sgod_decoder(
     clip_c  = config["oracle"].get("clip_vocab_cache")
     top_k   = config["oracle"]["top_k"]
     min_sg  = config["sgg"]["confidence_threshold"]
+    enable_bbox_oracle = bool(config["oracle"].get("enable_bbox_oracle", False))
+    bbox_pad_ratio     = float(config["oracle"].get("bbox_pad_ratio", 0.15))
+    bbox_score_multiplier = float(config["oracle"].get("bbox_score_multiplier", 1.0))
+    yesno_lambda          = float(config["oracle"].get("yesno_lambda", 0.0))
 
     ctx_cfg = config.get("context", {})
     base_lambda = ctx_cfg.get("base_lambda", {})
@@ -192,9 +217,21 @@ def load_sgod_decoder(
     max_tokens  = config["decoder"]["max_new_tokens"]
     temperature = config["decoder"].get("temperature", 0.0)
 
+    sgg_cfg     = config.get("sgg", {})
+    use_gd      = bool(sgg_cfg.get("use_grounding_dino", False))
+    gd_model    = sgg_cfg.get("grounding_dino_model", "IDEA-Research/grounding-dino-base")
+    gd_box_thr  = float(sgg_cfg.get("grounding_dino_box_threshold", 0.25))
+    gd_text_thr = float(sgg_cfg.get("grounding_dino_text_threshold", 0.2))
+
     model, processor = load_llava(vlm_id, dtype=dtype, device_map=dmap,
                                    load_in_4bit=load_in_4bit)
-    sgg = load_sgg(ckpt, device=device)
+    sgg = load_sgg(
+        ckpt, device=device,
+        use_grounding_dino=use_gd,
+        grounding_dino_model=gd_model,
+        grounding_dino_box_threshold=gd_box_thr,
+        grounding_dino_text_threshold=gd_text_thr,
+    )
     clip_factory = load_clip_factory(
         model_name=clip_m,
         vocab_cache_path=clip_c,
@@ -213,5 +250,9 @@ def load_sgod_decoder(
         max_negation_depth=max_neg,
         max_new_tokens=max_tokens,
         temperature=temperature,
+        enable_bbox_oracle=enable_bbox_oracle,
+        bbox_pad_ratio=bbox_pad_ratio,
+        bbox_score_multiplier=bbox_score_multiplier,
+        yesno_lambda=yesno_lambda,
     )
     return decoder

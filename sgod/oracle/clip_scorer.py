@@ -90,6 +90,9 @@ class CLIPScorer:
                 else:
                     logger.warning("Vocab cache not found at %s — live encoding will be used", cache_path)
 
+        # Stash preprocess so a sibling BboxClipScorer can share the transform.
+        self._preprocess = preprocess
+
         with torch.no_grad():
             img_tensor = preprocess(image).unsqueeze(0).to(self.device)
             feat = self._model.encode_image(img_tensor)
@@ -137,6 +140,21 @@ class CLIPScorer:
     def embedding_dim(self) -> int:
         """Dimensionality of the CLIP embedding space."""
         return self._image_feat.shape[-1]
+
+    def to_preloaded(self) -> dict:
+        """Return a ``_preloaded`` dict for sibling scorers (e.g. BboxClipScorer).
+
+        Lets us spin up a bbox-conditioned scorer for the same image without
+        reloading CLIP weights or the vocab cache.
+        """
+        return {
+            "model": self._model,
+            "tokenizer": self._tokenizer,
+            "preprocess": self._preprocess,
+            "vocab_embeddings": self._vocab_embeddings,
+            "vocab_words": self._vocab_words,
+            "vocab_index": self._vocab_index,
+        }
 
     # ── Internal ─────────────────────────────────────────────────────────
 

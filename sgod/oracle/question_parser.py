@@ -21,7 +21,11 @@ from __future__ import annotations
 import re
 
 # Words after determiners that aren't real targets — they're scene/image
-# referents or generic discourse markers.
+# referents or generic discourse markers. "person" was previously here on the
+# theory that "the person riding X" should resolve X. Removed because the POPE
+# spike showed it tanked recall on "Is there a person?" questions and our
+# multi-target oracle handles "person + X" via max-pooling, so including
+# "person" doesn't hurt the original use case.
 _GENERIC_REFERENTS: frozenset[str] = frozenset({
     "image", "photo", "picture", "scene", "background", "foreground",
     "left", "right", "top", "bottom", "middle", "center", "side",
@@ -29,7 +33,6 @@ _GENERIC_REFERENTS: frozenset[str] = frozenset({
     "color", "colors", "colour", "colours", "size", "sizes",
     "number", "numbers", "kind", "kinds", "type", "types",
     "way", "ways", "name", "names", "place", "places",
-    "person",  # often paired with "the person riding/playing X" → X is the target
 })
 
 _DETERMINERS: frozenset[str] = frozenset({
@@ -63,6 +66,9 @@ _ADJECTIVES: frozenset[str] = frozenset({
 _NON_NOUNS: frozenset[str] = frozenset({
     "is", "are", "was", "were", "be", "been", "being", "am",
     "do", "does", "did", "have", "has", "had",
+    # Modal verbs — need to close NP walk so "How many forks CAN you see"
+    # doesn't capture "can" as the head.
+    "can", "could", "may", "might", "shall", "should", "will", "would", "must",
     "on", "in", "at", "by", "with", "without", "for", "to", "from", "of",
     "near", "above", "below", "under", "over", "behind", "beside",
     "and", "or", "but", "if", "so", "than", "as",
@@ -89,12 +95,33 @@ def _singular(word: str) -> str:
     return w
 
 
+# Tokens that signal the END of a noun phrase. A determiner triggers an NP
+# walk; the walk ends when we hit a function word, preposition, conjunction,
+# or another determiner (so "the two surfboards" → "two" closes the NP after
+# "the" and starts a new NP from "two").
+_NP_BOUNDARIES: frozenset[str] = _NON_NOUNS | _DETERMINERS
+
+# Cap NP-walk length so a run-on sentence ("the dog playing in the park
+# wearing a hat") doesn't bleed into a 6-word "phrase".
+_MAX_NP_LEN: int = 4
+
+
 def parse_targets(question: str) -> list[str]:
     """Return ordered list of target nouns the question asks about.
 
-    Walks tokens; whenever a determiner (or number) is seen, skips up to two
-    adjectives and emits the next non-function word as a target. Strips
-    generic referents (image/photo/...) and deduplicates while preserving order.
+    Walks tokens; on each determiner, captures the entire noun phrase span
+    that follows (up to ``_MAX_NP_LEN`` tokens, ending at the first NP
+    boundary), drops any generic referents, and emits the LAST surviving
+    word as the head noun.
+
+    Why head-as-last-word: the previous adjective-skipping logic stopped at
+    the first non-adjective and called it the head. That mishandled multi-
+    word objects like "dining table" → emitted "dining". Walking the whole
+    NP and taking the tail gives "table" instead, which the downstream
+    ``match_targets_to_vocab`` substring-matcher can hook into.
+
+    Strips generic referents (image/photo/scene/...) and deduplicates while
+    preserving order.
     """
     if not question:
         return []
@@ -103,31 +130,32 @@ def parse_targets(question: str) -> list[str]:
     i = 0
     while i < len(tokens):
         if tokens[i] in _DETERMINERS:
+            # Walk the NP span starting just after the determiner.
             j = i + 1
-            adjs_seen = 0
-            # Skip up to 2 adjectives.
-            while j < len(tokens) and adjs_seen < 2 and tokens[j] in _ADJECTIVES:
-                adjs_seen += 1
+            np: list[str] = []
+            while (
+                j < len(tokens)
+                and len(np) < _MAX_NP_LEN
+                and tokens[j] not in _NP_BOUNDARIES
+            ):
+                np.append(tokens[j])
                 j += 1
-            # Now tokens[j] should be the head noun. Reject if it's a function
-            # word, another determiner, or shorter than 3 chars.
-            advanced = False
-            if j < len(tokens):
-                head = tokens[j]
+            # Drop generic referents — they're never real targets.
+            np = [w for w in np if w not in _GENERIC_REFERENTS]
+            if np:
+                head = np[-1]
+                # Final filters: head must not be a function-word/determiner
+                # leftover (defensive) and must be at least 2 chars to allow
+                # short COCO labels like "tv".
                 if (
-                    len(head) >= 3
+                    len(head) >= 2
                     and head not in _NON_NOUNS
                     and head not in _DETERMINERS
-                    and head not in _GENERIC_REFERENTS
                 ):
                     targets.append(head)
-                    i = j + 1
-                    advanced = True
-            # If head was rejected (or absent), restart search from j so a
-            # nested determiner ("the two cars" → after "the" hits "two") can
-            # itself trigger a determiner search.
-            if not advanced:
-                i = max(j, i + 1)
+            # Continue scanning from where the NP ended; if we made no
+            # progress (j==i+1 and np empty) advance by one to avoid loops.
+            i = j if j > i + 1 else i + 1
         else:
             i += 1
 
@@ -137,6 +165,46 @@ def parse_targets(question: str) -> list[str]:
         if t not in seen:
             seen[t] = None
     return list(seen.keys())
+
+
+# Yes/no auxiliary verbs that signal a binary-answer question.
+# Used by SGODDecoder to apply a stronger oracle injection on the first
+# generated token of POPE-style questions where soft-additive scoring at
+# anchor positions never fires (yes/no are neutral tokens).
+_YESNO_AUX: frozenset[str] = frozenset({
+    "is", "are", "was", "were", "am", "be",
+    "do", "does", "did",
+    "has", "have", "had",
+    "can", "could", "may", "might",
+    "shall", "should", "will", "would", "must",
+})
+
+
+def is_yesno_question(question: str) -> bool:
+    """Detect whether ``question`` expects a yes/no answer.
+
+    Two signals (any one suffices):
+      1. The prompt explicitly asks for "yes or no" or "(yes/no)".
+      2. Some sentence ending in "?" starts with a yes/no auxiliary verb
+         ("Is there...", "Are these...", "Does the...", etc.).
+
+    The detector is intentionally permissive — false positives on yes/no
+    detection only cause the oracle to push yes/no logits on a question
+    where the model wasn't going to emit yes/no anyway, which is a no-op.
+    """
+    if not question:
+        return False
+    text = question.lower()
+    if "yes or no" in text or "(yes/no)" in text:
+        return True
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line.endswith("?"):
+            continue
+        words = re.findall(r"[a-z]+", line)
+        if words and words[0] in _YESNO_AUX:
+            return True
+    return False
 
 
 def match_targets_to_vocab(targets: list[str], vocab: set[str]) -> list[str]:

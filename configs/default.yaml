@@ -6,6 +6,14 @@ sgg:
   model: "reltr"
   checkpoint: "data/checkpoints/reltr/checkpoint0149.pth"
   confidence_threshold: 0.4    # Below this → deactivate oracle (Section 4.5)
+  # M1.3 BG-SGOD: hybrid scene graph — open-vocab objects from Grounding DINO,
+  # closed-vocab relations from RelTR. Required for the bbox-conditioned
+  # attribute oracle (M1.5) to find target bboxes for question concepts that
+  # RelTR's 151-class vocab misses (kitchen, fire hydrant, ferris wheel, ...).
+  use_grounding_dino: true
+  grounding_dino_model: "IDEA-Research/grounding-dino-base"
+  grounding_dino_box_threshold: 0.25
+  grounding_dino_text_threshold: 0.2
 
 # --- Visual Oracle (Component 2) ---
 oracle:
@@ -13,6 +21,30 @@ oracle:
   clip_vocab_cache: "data/checkpoints/clip/clip_vocab_cache.pt"
   top_k: 50                    # Top-K candidate re-ranking (Risk 3)
   dual_source: true            # SGG + CLIP fallback
+  # M1.5 BG-SGOD: bbox-conditioned CLIP for OOV attribute scoring.
+  # Parses the question for target nouns, looks up their bbox in the SG, and
+  # scores attribute tokens against the cropped region instead of the whole
+  # image. Required to recover the colour/state attribution that image-global
+  # CLIP cannot disambiguate (Section 5 of BG-SGOD design).
+  enable_bbox_oracle: true
+  bbox_pad_ratio: 0.15         # Pad each side of bbox by 15% before cropping
+  # Direction-test (2026-05-01_17-10 run): under greedy + λ=1.0, oracle was
+  # a no-op — 0/96 records had output differ from BASE despite 1137 anchor
+  # fires. Effective perturbation (~0.045 logits) is below LLaVA's ~1-5
+  # logit gap. Bumping to 5.0 raises max bbox-path contribution to ~0.45
+  # logits, large enough to flip in the long tail. Use the resulting
+  # last_stats["flips"] list to direction-check: each flip records old/new
+  # top-1 so we can verify the oracle pushes toward GT, not away.
+  bbox_score_multiplier: 5.0
+  # Yes/no question injection (Bước 2 of POPE direction test). Anchor detector
+  # never fires on "yes"/"no" tokens (they're neutral), so the soft-additive
+  # path is a no-op for binary questions. Instead, on the first generated
+  # token of a yes/no question, add yesno_lambda directly to "yes" logits and
+  # subtract from "no" (or vice-versa) based on whether the bbox oracle
+  # detected the question's target. POPE spike showed direction ratio = 8×;
+  # λ=2.0 corresponds to ~2 logits, large enough to flip in many cases.
+  # Set to 0.0 to disable.
+  yesno_lambda: 2.0
 
 # --- Anchor Detector (Component 3) ---
 anchor:
@@ -38,7 +70,13 @@ context:
 decoder:
   vlm_model: "llava-hf/llava-1.5-7b-hf"
   max_new_tokens: 256
-  temperature: 0.7
+  # Greedy decoding. Required for clean A/B between BASE and SGOD: when
+  # use_oracle=False (low-quality scene graph), the decoder runs the same
+  # forward pass as BASE, so any non-zero base/sgod delta is sampling noise.
+  # Run 2026-05-01_16-43 (temp=0.7) showed 13/21 "losses" came from these
+  # oracle-off questions — pure noise, not regressions. Greedy makes the
+  # comparison apples-to-apples.
+  temperature: 0.0
   oracle_lambda: 0.35          # Base lambda, overridden by context
 
 # --- Hardware ---

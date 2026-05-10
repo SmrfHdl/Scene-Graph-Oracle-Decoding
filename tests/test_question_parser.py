@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from sgod.oracle.question_parser import (
+    is_yesno_question,
     match_targets_to_vocab,
     parse_targets,
 )
@@ -25,6 +26,41 @@ from sgod.oracle.question_parser import (
 ])
 def test_parse_targets(question, expected):
     assert parse_targets(question) == expected
+
+
+# ── Multi-word noun phrases (POPE spike fixes) ────────────────────────────────
+
+@pytest.mark.parametrize("question,expected", [
+    # Multi-word objects: head must be the LAST word, not the first non-adjective.
+    # This was the dominant POPE failure mode in spike 2026-05-08.
+    ("Is there a dining table in the image?",      ["table"]),
+    ("Is there a hot dog in the image?",           ["dog"]),
+    ("Is there a traffic light in the image?",     ["light"]),
+    ("Is there a sports ball in the image?",       ["ball"]),
+    ("Is there a baseball bat in the image?",      ["bat"]),
+    ("Is there a potted plant in the image?",      ["plant"]),
+    ("Is there a teddy bear in the image?",        ["bear"]),
+    ("Is there a fire truck in the image?",        ["truck"]),
+])
+def test_parse_targets_multi_word_np(question, expected):
+    assert parse_targets(question) == expected
+
+
+def test_parse_targets_person_is_target():
+    # Was previously dropped as a generic referent; re-included after POPE
+    # spike showed many "Is there a person?" questions.
+    assert parse_targets("Is there a person in the image?") == ["person"]
+
+
+def test_parse_targets_short_head_allowed():
+    # Short COCO labels (≥2 chars) must be allowed through the head filter.
+    assert parse_targets("Is there a tv in the image?") == ["tv"]
+
+
+def test_parse_targets_drops_image_but_not_person():
+    # Sanity: image/photo/etc. still drop, person no longer does.
+    assert parse_targets("Describe the image.") == []
+    assert parse_targets("Describe the person.") == ["person"]
 
 
 def test_parse_targets_empty():
@@ -84,3 +120,29 @@ def test_match_empty_vocab():
 
 def test_match_no_targets():
     assert match_targets_to_vocab([], {"dog"}) == []
+
+
+# ── is_yesno_question ────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("question,expected", [
+    ("Is there a dog in the image?",                          True),
+    ("Are these traffic lights working?",                     True),
+    ("Does the man wear a hat?",                              True),
+    ("Has the bus left the station?",                         True),
+    ("Can you see a fork on the table?",                      True),
+    ("Should the camera be tilted up?",                       True),
+    ("USER: <image>\nIs there a dog?\nAnswer with yes or no.\nASSISTANT:", True),
+    ("Yes/No: is the dog brown? (yes/no)",                    True),
+    # Open-ended questions
+    ("What color is the pillow?",                             False),
+    ("How many forks can you see?",                           False),
+    ("Describe the image in detail.",                         False),
+    ("Which truck has its door open?",                        False),
+])
+def test_is_yesno_question(question, expected):
+    assert is_yesno_question(question) is expected
+
+
+def test_is_yesno_question_empty():
+    assert is_yesno_question("") is False
+    assert is_yesno_question(None) is False  # type: ignore[arg-type]

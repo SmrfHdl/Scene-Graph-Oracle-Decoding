@@ -42,6 +42,7 @@ class SGGModule:
         device: Optional[str] = None,
         confidence_threshold: float = 0.3,
         top_k: int = 20,
+        gd_module: Optional["GroundingDinoModule"] = None,  # noqa: F821
     ):
         """Initialize SGGModule.
 
@@ -50,18 +51,25 @@ class SGGModule:
             device: Target device. Auto-detects CUDA if available.
             confidence_threshold: Min confidence for each triplet component
             top_k: Max number of triplets to extract per image
+            gd_module: Optional GroundingDinoModule. When provided, ``extract``
+                uses Grounding DINO for *objects* (open-vocab) and RelTR only
+                for *relation triplets* — the M1.3 hybrid scene graph. Without
+                it, extract() returns the legacy RelTR-only scene graph.
         """
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
         self.confidence_threshold = confidence_threshold
         self.top_k = top_k
+        self.gd_module = gd_module
 
         logger.info(f"Loading RelTR from {checkpoint_path} on {device}")
         self.model = load_reltr_model(checkpoint_path, device=device)
         logger.info(
             f"RelTR loaded: {sum(p.numel() for p in self.model.parameters()) / 1e6:.1f}M params"
         )
+        if gd_module is not None:
+            logger.info("SGGModule will use Grounding DINO for open-vocab objects (hybrid mode).")
 
     @torch.no_grad()
     def extract(self, image: Image.Image) -> SceneGraph:
@@ -102,6 +110,17 @@ class SGGModule:
             rel_confs=result["rel_confs"],
             image_size=image_size,
         )
+
+        # Hybrid mode: replace RelTR's closed-vocab objects with Grounding DINO's
+        # open-vocab detections. Relations stay as RelTR predicted them — they
+        # use a small predicate vocabulary that RelTR is well-trained on.
+        if self.gd_module is not None:
+            gd_objects = self.gd_module.detect(image)
+            scene_graph = SceneGraph.from_hybrid(
+                gd_objects=gd_objects,
+                reltr_relations=scene_graph.relations,
+                image_size=image_size,
+            )
 
         logger.debug(
             f"Extracted: {len(scene_graph.objects)} objects, "
