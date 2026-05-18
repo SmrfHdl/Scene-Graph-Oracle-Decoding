@@ -61,10 +61,17 @@ class DTSGODPolicy(nn.Module, Policy):
         }
 
     def adjust_logits(self, state: GenerationState) -> Tensor:
-        """Return Δ [B, V] to add to `state.lm_logits` before sampling."""
+        """Return Δ [B, V] to add to `state.lm_logits` before sampling.
+
+        Flow:
+          1. Lazily init h_slow on the first call.
+          2. ATG decides per-batch whether to re-fire the slow module.
+          3. Where ATG fires, run GP.forward to refresh h_slow (per-batch mask).
+          4. Speaker Adapter produces Δ from (h_t, h_slow). At init γ=0 ⇒ Δ=0.
+        """
         ps = state.policy_state
         h = state.hidden_states           # [B, d]
-        B, d = h.shape
+        B, _ = h.shape
         device = h.device
 
         # Materialize h_slow on first call (when we know B and device).
@@ -73,18 +80,30 @@ class DTSGODPolicy(nn.Module, Policy):
 
         h_slow: Tensor = ps["h_slow"]      # [B, S, d]
 
-        # Decide whether to re-fire the slow module this step.
+        # ATG: decide whether to re-fire the slow module this step.
+        # Day-2: hard threshold (no gradient through routing). Stage-1 training
+        # will add a Lagrangian on E[fire_prob]; the straight-through estimator
+        # for routing gradient lands in Week 1.
         with torch.no_grad():
-            h_slow_pooled = h_slow.mean(dim=1)              # [B, d]
-            lm_entropy = self._entropy(state.lm_logits)     # [B]
-            fire_prob = self.anchor_gate(h, h_slow_pooled, lm_entropy)   # [B]
-            # Per-batch fire signal; in Day-1 stub we don't yet act on it
-            # (GP.forward is identity), but the shape contract is in place.
-            ps["last_fire_prob"] = fire_prob
+            h_slow_pooled = h_slow.mean(dim=1)                            # [B, d]
+            lm_entropy = self._entropy(state.lm_logits)                   # [B]
+            fire_prob = self.anchor_gate(h, h_slow_pooled, lm_entropy)    # [B]
+        ps["last_fire_prob"] = fire_prob
 
-        # Speaker Adapter — produces Δ, gated by γ.
-        delta = self.speaker_adapter(h, h_slow)              # [B, V]
-        return delta
+        # If any batch element wants to fire, run GP and mix per-batch.
+        fire_mask = (fire_prob > 0.5).to(h_slow.dtype)                    # [B]
+        if fire_mask.any():
+            # Day-2 prefix_summary stand-in: the current hidden state itself.
+            # Week 1 will replace with a mean-pool over the last K_t hidden states
+            # tracked by the orchestrator.
+            h_slow_new = self.grounding_planner(h_slow, h, ps["evidence"])  # [B, S, d]
+            mask = fire_mask.view(B, 1, 1)
+            h_slow = mask * h_slow_new + (1.0 - mask) * h_slow
+            ps["h_slow"] = h_slow
+
+        # Speaker Adapter — produces Δ, gated by γ. With γ=0 and out_proj=0
+        # at init, Δ ≡ 0 regardless of h_slow content.
+        return self.speaker_adapter(h, h_slow)                             # [B, V]
 
     def update_state(self, state: GenerationState, sampled_token_id: int) -> dict[str, Any]:
         """Advance the policy state after a token is sampled.
