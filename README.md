@@ -22,6 +22,8 @@ uv sync
 #   PYTHONPATH=$(pwd) conda run -n <env> python <script>
 ```
 
+SPIN=/home/uet/anaconda3/envs/spin/bin/python
+
 > **Note for shared GPU servers:** If `import torch` fails with `undefined symbol: ncclCommWindowDeregister`,
 > the installed PyTorch binary doesn't match the system CUDA driver.
 > Find a working conda env: `conda env list`, then test each with the command above.
