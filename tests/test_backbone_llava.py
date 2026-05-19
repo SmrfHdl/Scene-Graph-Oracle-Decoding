@@ -191,9 +191,11 @@ def test_forward_step_real_llava_smoke():
 def test_dt_sgod_at_init_matches_baseline_on_real_llava():
     """G1 invariant end-to-end: DT-SGOD@init wrapping real LLaVA = LLaVA-base.
 
-    With γ=0 and out_proj=0, the policy's Δ ≡ 0, so wrapping the backbone in
-    a HallucinationDecoder driven by DTSGODPolicy must produce *identical*
-    tokens to driving the backbone alone. Single byte difference = bug.
+    With γ=0 and out_proj=0, the policy's Δ ≡ 0, so the orchestrator's output
+    must match a plain-backbone argmax loop verbatim. We assert two things:
+      1. step_hook sees Δ == 0 at every step (the policy's promise).
+      2. The decoded answer matches a plain backbone-only argmax loop
+         (the orchestrator's promise).
 
     This is the canonical Gate G1 verification on real hardware.
     """
@@ -216,7 +218,7 @@ def test_dt_sgod_at_init_matches_baseline_on_real_llava():
     prompt = "USER: <image>\nDescribe the image. ASSISTANT:"
     n_tokens = 10
 
-    # ── Path A: backbone alone, greedy argmax loop.
+    # ── Path A: backbone alone, greedy argmax loop. Produces ground-truth IDs.
     inputs_a = backbone.prepare_inputs(img, prompt)
     gen_a = torch.empty(1, 0, dtype=torch.long)
     for _ in range(n_tokens):
@@ -225,66 +227,46 @@ def test_dt_sgod_at_init_matches_baseline_on_real_llava():
         gen_a = torch.cat([gen_a, torch.tensor([[next_id]])], dim=-1)
         if next_id == backbone.tokenizer().eos_token_id:
             break
-    tokens_a = gen_a[0].tolist()
+    baseline_answer = backbone.tokenizer().decode(gen_a[0].tolist(), skip_special_tokens=True)
 
-    # ── Path B: same backbone via HallucinationDecoder + DTSGODPolicy@init.
+    # ── Path B: orchestrator + DTSGODPolicy@init. step_hook asserts Δ=0 live.
     policy = DTSGODPolicy(
         hidden_dim=backbone.hidden_dim, vocab_size=backbone.vocab_size,
     )
     policy.eval()
     assert policy.is_identity_at_init(), "policy must be identity at init"
 
+    max_abs_deltas: list[float] = []
+
+    def _assert_delta_zero(_state, delta):
+        # Capture, don't assert here — pytest assertion failures inside hooks
+        # surface as the orchestrator's stack frame, hiding the step. We
+        # collect and assert after generation so the report points back
+        # to the test body.
+        max_abs_deltas.append(float(delta.abs().max().item()))
+
     decoder = HallucinationDecoder(
         backbone=backbone, oracle=_EmptyOracle(), policy=policy,
         max_new_tokens=n_tokens, temperature=0.0, hidden_buffer_size=0,
+        step_hook=_assert_delta_zero,
     )
-    # Decode via the orchestrator. We compare the produced token sequence,
-    # not just the decoded string, to catch any single-token divergence.
-    tokens_b_str = decoder.generate(image=img, prompt=prompt, question="Describe the image.")
-    # Drive the loop manually mirroring HallucinationDecoder so we have
-    # the token IDs in hand for a head-to-head ID-level comparison with Path A.
-    inputs_b = backbone.prepare_inputs(img, prompt)
-    evidence = _EmptyOracle().extract(img)
-    evidence.extra["image"] = img
-    evidence.extra["question"] = "Describe the image."
-    policy_state = policy.init_state(evidence)
-    gen_b = torch.empty(1, 0, dtype=torch.long)
-    from sgod.core.types import GenerationState
-    for step in range(n_tokens):
-        hidden, lm_logits = backbone.forward_step(inputs_b, gen_b)
-        state = GenerationState(
-            prompt_ids=torch.empty(1, 0, dtype=torch.long),
-            generated_ids=gen_b,
-            hidden_states=hidden,
-            lm_logits=lm_logits,
-            evidence=evidence,
-            step=step,
-            policy_state=policy_state,
-        )
-        delta = policy.adjust_logits(state)
-        assert torch.all(delta == 0), \
-            f"step {step}: Δ must be exactly zero at init; got max |Δ|={delta.abs().max().item()}"
-        next_id = int(torch.argmax((lm_logits + delta)[0]).item())
-        gen_b = torch.cat([gen_b, torch.tensor([[next_id]])], dim=-1)
-        policy_state = policy.update_state(state, sampled_token_id=next_id)
-        if next_id == backbone.tokenizer().eos_token_id:
-            break
-    tokens_b = gen_b[0].tolist()
+    dt_sgod_answer = decoder.generate(
+        image=img, prompt=prompt, question="Describe the image.",
+    )
 
-    assert tokens_a == tokens_b, (
-        f"DT-SGOD@init must produce identical tokens to baseline.\n"
-        f"  baseline: {tokens_a}\n"
-        f"  dt-sgod:  {tokens_b}\n"
-        f"  first diff at index "
-        f"{next((i for i, (a, b) in enumerate(zip(tokens_a, tokens_b)) if a != b), 'n/a')}"
+    # Promise 1: policy injected exactly zero at every step.
+    assert max_abs_deltas, "step_hook must fire at least once"
+    assert all(d == 0.0 for d in max_abs_deltas), (
+        f"Δ must be exactly 0 at init; saw nonzero |Δ| at step(s) "
+        f"{[i for i, d in enumerate(max_abs_deltas) if d != 0.0]} — "
+        f"max overall |Δ|={max(max_abs_deltas):.3e}"
     )
-    # The string-level result from the orchestrator should also match the
-    # baseline (sanity that the orchestrator path doesn't strip anything weird).
-    tokens_a_str = backbone.tokenizer().decode(tokens_a, skip_special_tokens=True)
-    assert tokens_a_str == tokens_b_str, (
-        f"orchestrator decode differs from baseline decode:\n"
-        f"  baseline: {tokens_a_str!r}\n"
-        f"  orch:     {tokens_b_str!r}"
+
+    # Promise 2: orchestrator output is identical to the baseline.
+    assert baseline_answer == dt_sgod_answer, (
+        f"DT-SGOD@init answer diverges from backbone-base:\n"
+        f"  baseline: {baseline_answer!r}\n"
+        f"  dt-sgod:  {dt_sgod_answer!r}"
     )
 
 

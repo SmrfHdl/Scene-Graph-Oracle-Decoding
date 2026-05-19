@@ -72,6 +72,9 @@ class HallucinationDecoder:
         # orchestrator's invariants depend on the policy fully owning the
         # state. Used by `sgod.runtime.trace_collector.TraceCollector`.
         self.step_hook = step_hook
+        # Flips True once we've aligned the policy's dtype + device to the
+        # backbone's actual hidden state. See `_align_policy_to_backbone`.
+        self._policy_aligned = False
 
     # ── public API ────────────────────────────────────────────────────────
 
@@ -126,6 +129,13 @@ class HallucinationDecoder:
 
         for step in range(max_new_tokens):
             hidden, lm_logits = self.backbone.forward_step(inputs, generated_ids)
+            # First step: align policy's dtype/device to what the backbone
+            # actually produces. LLaVA-1.5 runs in fp16 on CUDA; a freshly-
+            # constructed DTSGODPolicy is fp32 on CPU. Without this, the very
+            # first Linear inside SpeakerAdapter raises dtype/device mismatch.
+            if not self._policy_aligned:
+                self._align_policy_to_backbone(hidden)
+                self._policy_aligned = True
             if hidden_buffer is not None:
                 hidden_buffer.append(hidden.detach())
                 if len(hidden_buffer) > self.hidden_buffer_size:
@@ -166,6 +176,23 @@ class HallucinationDecoder:
         return tokenizer.decode(generated_ids[0].tolist(), skip_special_tokens=True)
 
     # ── internals ─────────────────────────────────────────────────────────
+
+    def _align_policy_to_backbone(self, hidden: torch.Tensor) -> None:
+        """Cast the policy's parameters to match the backbone's hidden tensor.
+
+        Called once per `generate()` invocation, on the first forward step.
+        No-op when the policy isn't an `nn.Module` (e.g. SGODv1Policy, which
+        keeps no learnable params and computes Δ in the LM-logits dtype).
+        """
+        if not isinstance(self.policy, torch.nn.Module):
+            return
+        try:
+            current = next(self.policy.parameters())
+        except StopIteration:
+            return  # no params to align
+        if current.dtype == hidden.dtype and current.device == hidden.device:
+            return
+        self.policy.to(device=hidden.device, dtype=hidden.dtype)
 
     @staticmethod
     def _extract_prompt_ids(inputs: dict[str, Any]) -> torch.Tensor:

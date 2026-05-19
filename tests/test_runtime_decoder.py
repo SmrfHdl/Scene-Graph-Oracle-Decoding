@@ -178,6 +178,60 @@ def test_dt_sgod_at_init_identical_to_baseline_argmax():
 
 # ── SGOD v1 wired via orchestrator: anchor boost flips a near-tied logit ─────
 
+def test_orchestrator_aligns_policy_dtype_to_backbone():
+    """When the backbone emits fp16 hidden states, an fp32 nn.Module policy
+    must be cast to fp16 before its first forward — otherwise F.linear raises
+    a dtype mismatch. Mirrors the LLaVA-1.5 (fp16 on CUDA) case end-to-end
+    but on CPU with a tiny fp16 fake backbone."""
+    from sgod.policies import DTSGODPolicy
+
+    class _Fp16Backbone(FakeBackbone):
+        def forward_step(self, inputs, generated_ids):
+            hidden, logits = super().forward_step(inputs, generated_ids)
+            return hidden.to(torch.float16), logits.to(torch.float16)
+
+    backbone = _Fp16Backbone([VOCAB["dog"], EOS_ID])
+    backbone.hidden_dim_value = D  # noqa: B018  documentation hint
+    oracle = FakeSGOracle(SceneGraph())
+    # Build the policy with backbone dims; defaults to fp32.
+    policy = DTSGODPolicy(hidden_dim=backbone.hidden_dim, vocab_size=backbone.vocab_size)
+    policy.eval()
+    assert next(policy.parameters()).dtype == torch.float32  # before generate()
+
+    dec = HallucinationDecoder(backbone, oracle, policy, max_new_tokens=3, hidden_buffer_size=0)
+    # Should not crash; the orchestrator aligns policy dtype on the first step.
+    dec.generate(object(), "prompt")
+    assert next(policy.parameters()).dtype == torch.float16, (
+        "policy must be cast to fp16 to match the fp16 backbone hidden states"
+    )
+
+
+def test_orchestrator_no_dtype_change_when_already_match():
+    """If policy and backbone already share dtype/device, the alignment must
+    not silently change the dtype (the only observable side effect we care
+    about — `.to()` may or may not copy storage depending on the torch
+    version, but it must never change the resulting dtype)."""
+    from sgod.policies import DTSGODPolicy
+    backbone = FakeBackbone([VOCAB["dog"], EOS_ID])  # fp32 by default
+    oracle = FakeSGOracle(SceneGraph())
+    policy = DTSGODPolicy(hidden_dim=backbone.hidden_dim, vocab_size=backbone.vocab_size)
+    policy.eval()
+    assert next(policy.parameters()).dtype == torch.float32
+    dec = HallucinationDecoder(backbone, oracle, policy, max_new_tokens=2, hidden_buffer_size=0)
+    dec.generate(object(), "prompt")
+    assert next(policy.parameters()).dtype == torch.float32
+
+
+def test_orchestrator_alignment_skips_non_module_policy():
+    """SGODv1Policy isn't an nn.Module — alignment must be a no-op, not a crash."""
+    backbone = FakeBackbone([VOCAB["dog"], EOS_ID])
+    oracle = FakeSGOracle(SceneGraph())
+    policy = SGODv1Policy(tokenizer=FakeTokenizer(), clip_factory=lambda _i: FakeCLIPScorer())
+    dec = HallucinationDecoder(backbone, oracle, policy, max_new_tokens=2)
+    # Just verify it runs without AttributeError on the non-Module policy.
+    dec.generate(object(), "Is there a dog?")
+
+
 def test_sgod_v1_orchestrated_anchor_boost():
     """At noun_anchor (prev='a'), SG-in-vocab 'dog' must beat near-tied 'cat'."""
 
