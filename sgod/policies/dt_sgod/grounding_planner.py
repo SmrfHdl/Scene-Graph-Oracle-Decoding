@@ -2,30 +2,34 @@
 
 Per-fire computation:
 
-    1. Featurize each object in the scene graph into a [node_embed_dim + 5] vector
+    1. Featurize each object in the scene graph into a [embed_dim + 5] vector
        (label embedding ⊕ normalized bbox ⊕ confidence).
     2. Project to hidden_dim via a learned linear layer → g_v ∈ ℝ^{N × d}.
     3. Slot attention: each of S slots soft-attends over the N nodes.
     4. GRU update per slot: input = [context, prefix_summary] → new h_slow_s.
 
-The label embedding uses a deterministic hash-seeded random vector (cached
-per label). This is a Day-2 placeholder; Week 2 swaps it for CLIP text
-embeddings of the class name (the projection layer absorbs the dimensionality
-change without breaking the API).
+Label embeddings come from a pluggable `LabelEmbedder` (see
+`sgod.policies.dt_sgod.label_embedders`). The default is `HashLabelEmbedder`,
+which yields md5-seeded random vectors — cheap, deterministic, dependency-
+free, but carries no semantic structure. Pass a `CLIPTextLabelEmbedder` to
+get open-vocab CLIP text features; the GP's `node_proj` layer absorbs any
+dim mismatch automatically.
 
-Relations / edges are not yet consumed in Day 2 — slot attention runs over
-node features only. Adding a GAT layer with edge-conditioned aggregation is a
+Relations / edges are not yet consumed — slot attention runs over node
+features only. Adding a GAT layer with edge-conditioned aggregation is a
 Week-2 enhancement.
 """
 from __future__ import annotations
-
-import hashlib
 
 import torch
 from torch import Tensor, nn
 
 from sgod.core.types import OracleEvidence
 from sgod.policies.dt_sgod.config import DTSGODConfig
+from sgod.policies.dt_sgod.label_embedders import (
+    HashLabelEmbedder,
+    LabelEmbedder,
+)
 
 # Bbox(4) + confidence(1) appended to the label embedding before projection.
 _BBOX_CONF_DIM = 5
@@ -39,15 +43,23 @@ class GroundingPlanner(nn.Module):
         hidden_dim: int,
         config: DTSGODConfig,
         node_embed_dim: int = 128,
+        label_embedder: LabelEmbedder | None = None,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
         self.config = config
         self.num_slots = config.num_slots
-        self.node_embed_dim = node_embed_dim
+        # `label_embedder.embed_dim` is the authoritative source of the label
+        # feature dimensionality. `node_embed_dim` is only used to build the
+        # default HashLabelEmbedder when no embedder is supplied.
+        self.label_embedder: LabelEmbedder = (
+            label_embedder if label_embedder is not None
+            else HashLabelEmbedder(embed_dim=node_embed_dim)
+        )
+        self.node_embed_dim = self.label_embedder.embed_dim
 
         # Project [label_embed ⊕ bbox(4) ⊕ confidence(1)] → hidden_dim.
-        self.node_proj = nn.Linear(node_embed_dim + _BBOX_CONF_DIM, hidden_dim, bias=False)
+        self.node_proj = nn.Linear(self.node_embed_dim + _BBOX_CONF_DIM, hidden_dim, bias=False)
 
         # Diverse per-slot initialization. Each slot is its own learnable vector.
         # Week 2: optionally init from K-means clustering of SG node embeddings.
@@ -62,10 +74,7 @@ class GroundingPlanner(nn.Module):
         self.input_proj = nn.Linear(2 * hidden_dim, hidden_dim, bias=False)
         self.gru = nn.GRUCell(hidden_dim, hidden_dim)
 
-        # Deterministic label → tensor cache. Persists for the lifetime of the
-        # module instance (so re-asking for the same label is cheap, and the
-        # embedding is stable across `forward` calls).
-        self._label_cache: dict[str, Tensor] = {}
+        # The embedder owns its own cache; nothing more to set up here.
 
     # ── public API ────────────────────────────────────────────────────────
 
@@ -129,22 +138,13 @@ class GroundingPlanner(nn.Module):
 
     @torch.no_grad()
     def _featurize_label(self, label: str) -> Tensor:
-        """Deterministic pseudo-embedding for an object-class label.
+        """Delegate to the configured `LabelEmbedder`.
 
-        Stable across runs (md5-seeded) and stable across calls within a run
-        (cached). The tensor lives on CPU; movement to the active device is
-        handled by `_build_node_features`.
+        The returned tensor lives on CPU; `_build_node_features` handles the
+        move to the active device. Determinism + caching are the embedder's
+        responsibility (see `LabelEmbedder.embed`).
         """
-        cached = self._label_cache.get(label)
-        if cached is not None:
-            return cached
-        digest = hashlib.md5(label.encode("utf-8")).digest()
-        seed = int.from_bytes(digest[:4], "big")
-        g = torch.Generator()
-        g.manual_seed(seed)
-        feat = torch.randn(self.node_embed_dim, generator=g) * 0.02
-        self._label_cache[label] = feat
-        return feat
+        return self.label_embedder.embed(label)
 
     @torch.no_grad()
     def _build_node_features(

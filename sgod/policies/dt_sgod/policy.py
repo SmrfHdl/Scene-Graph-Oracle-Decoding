@@ -22,6 +22,7 @@ from sgod.core.types import GenerationState, OracleEvidence
 from sgod.policies.dt_sgod.anchor_gate import AnchorTriggerGate
 from sgod.policies.dt_sgod.config import DTSGODConfig
 from sgod.policies.dt_sgod.grounding_planner import GroundingPlanner
+from sgod.policies.dt_sgod.label_embedders import LabelEmbedder
 from sgod.policies.dt_sgod.speaker_adapter import SpeakerAdapter
 
 
@@ -40,13 +41,16 @@ class DTSGODPolicy(nn.Module, Policy):
         hidden_dim: int,
         vocab_size: int,
         config: DTSGODConfig | None = None,
+        label_embedder: LabelEmbedder | None = None,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_dim = hidden_dim
         self.vocab_size = vocab_size
         self.config = config or DTSGODConfig()
 
-        self.grounding_planner = GroundingPlanner(hidden_dim, self.config)
+        self.grounding_planner = GroundingPlanner(
+            hidden_dim, self.config, label_embedder=label_embedder,
+        )
         self.speaker_adapter = SpeakerAdapter(hidden_dim, vocab_size, self.config)
         self.anchor_gate = AnchorTriggerGate(hidden_dim, self.config)
 
@@ -93,10 +97,13 @@ class DTSGODPolicy(nn.Module, Policy):
         # If any batch element wants to fire, run GP and mix per-batch.
         fire_mask = (fire_prob > 0.5).to(h_slow.dtype)                    # [B]
         if fire_mask.any():
-            # Day-2 prefix_summary stand-in: the current hidden state itself.
-            # Week 1 will replace with a mean-pool over the last K_t hidden states
-            # tracked by the orchestrator.
-            h_slow_new = self.grounding_planner(h_slow, h, ps["evidence"])  # [B, S, d]
+            # Prefix summary = mean of the last K_t backbone hidden states
+            # (oldest first, newest last), as published by the orchestrator
+            # in `state.hidden_buffer`. Falls back to the current hidden when
+            # no buffer is supplied — keeps the policy usable without the
+            # full runtime (e.g. for unit tests that drive the policy directly).
+            prefix_summary = self._prefix_summary(state, h)
+            h_slow_new = self.grounding_planner(h_slow, prefix_summary, ps["evidence"])  # [B, S, d]
             mask = fire_mask.view(B, 1, 1)
             h_slow = mask * h_slow_new + (1.0 - mask) * h_slow
             ps["h_slow"] = h_slow
@@ -122,6 +129,20 @@ class DTSGODPolicy(nn.Module, Policy):
         log_probs = torch.log_softmax(logits, dim=-1)
         probs = log_probs.exp()
         return -(probs * log_probs).sum(dim=-1)
+
+    @staticmethod
+    def _prefix_summary(state: GenerationState, fallback: Tensor) -> Tensor:
+        """Mean-pool over the orchestrator's K_t hidden buffer.
+
+        Returns `fallback` (typically the current step's hidden) when no buffer
+        was supplied or the buffer is empty.
+        """
+        buf = state.hidden_buffer
+        if not buf:
+            return fallback
+        # buf is a list of [B, d] tensors (oldest first). Stack and mean over time.
+        stacked = torch.stack(buf, dim=0)  # [K, B, d]
+        return stacked.to(dtype=fallback.dtype, device=fallback.device).mean(dim=0)
 
     # ── Convenience ───────────────────────────────────────────────────────
 

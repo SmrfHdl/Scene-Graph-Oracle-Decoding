@@ -1,0 +1,44 @@
+# SGOD v1 driven through the new framework — the training-free baseline.
+#
+# Same legacy SGODDecoder behavior, but wired as a Policy so it runs through
+# the framework's Backbone/Oracle/Policy orchestrator. Used as:
+#   - Ablation baseline against DT-SGOD.
+#   - Teacher for Stage-0 distillation into the DT-SGOD SpeakerAdapter.
+
+backbone:
+  name: "llava-1.5-7b"
+  model_id: "llava-hf/llava-1.5-7b-hf"
+  dtype: "float16"
+  device_map: "auto"
+  load_in_4bit: false
+
+oracle:
+  name: "reltr"
+  checkpoint_path: "data/checkpoints/reltr/checkpoint0149.pth"
+  device: "cuda"
+  confidence_threshold: 0.3
+  top_k: 20
+  grounding_dino:
+    enabled: true
+    model_id: "IDEA-Research/grounding-dino-base"
+    box_threshold: 0.25
+    text_threshold: 0.2
+
+policy:
+  name: "sgod-v1"
+  top_k: 50
+  min_sg_confidence: 0.4
+  negation_decay: 0.25
+  max_negation_depth: 3.0
+  # CLIP scorer factory (matches legacy decoder behavior).
+  clip_factory:
+    model_name: "ViT-L-14"
+    pretrained: "openai"
+    vocab_cache_path: "data/checkpoints/clip/clip_vocab_cache.pt"
+    device: "cuda"
+
+runtime:
+  max_new_tokens: 256
+  temperature: 0.0
+  # SGOD v1 doesn't read the hidden buffer; setting 0 saves memory.
+  hidden_buffer_size: 0

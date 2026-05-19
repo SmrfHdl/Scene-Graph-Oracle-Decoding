@@ -46,6 +46,11 @@ class GenerationState:
         step:             current decode step index (0-based).
         policy_state:     opaque dict owned by the Policy for slot states, gate counters, etc.
         rule_anchor_type: optional anchor label from rule-based detector (used as ATG warmup signal).
+        hidden_buffer:    rolling list of the last K_t backbone hidden states
+                          (each [B, d]), oldest first, newest last. Maintained by the
+                          orchestrator. Policies that want a prefix-summary read this
+                          (DT-SGOD does so to feed the slow module). May be None
+                          for orchestrators that do not maintain a buffer.
     """
     prompt_ids: Tensor
     generated_ids: Tensor
@@ -55,6 +60,7 @@ class GenerationState:
     step: int
     policy_state: dict[str, Any] = field(default_factory=dict)
     rule_anchor_type: Optional[str] = None
+    hidden_buffer: Optional[list] = None
 
 
 __all__ = [

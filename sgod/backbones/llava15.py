@@ -4,13 +4,22 @@ Wraps the existing `sgod.utils.model_loader.load_llava` function so that LLaVA
 fits the framework's `Backbone` interface. The underlying HF model and processor
 are loaded lazily on first use to keep instantiation cheap for tests.
 
-The `forward_step` implementation is a stub for Day 1; Week 1 fills it in
-once the cache/KV-handling strategy is finalized.
+`forward_step` is KV-cache aware:
+  - On the first call, runs the full prompt + pixel_values forward and stashes
+    `past_key_values` in `inputs`.
+  - On subsequent calls, sends only the latest generated token along with the
+    cached `past_key_values`, so per-step compute is O(1) in prompt length.
+
+The cache lives in the `inputs` dict that the orchestrator threads through the
+generation loop — there is no hidden state on the backbone itself, so a single
+backbone instance can be shared across generate() calls (each call uses a fresh
+`inputs` dict from `prepare_inputs`).
 """
 from __future__ import annotations
 
 from typing import Any
 
+import torch
 from torch import Tensor
 
 from sgod.core.interfaces import Backbone
@@ -109,8 +118,9 @@ class LLaVAv15Backbone(Backbone):
         """Build the dict consumed by `forward_step`.
 
         For LLaVA-1.5 the processor handles both image preprocessing and
-        prompt tokenization. The returned dict carries the processor output
-        plus the raw image for any policy that needs it.
+        prompt tokenization. The returned dict also carries an initially-empty
+        `past_key_values` slot that `forward_step` mutates in place to maintain
+        the KV cache across decode steps.
         """
         self._ensure_loaded()
         proc_out = self._processor(images=image, text=prompt, return_tensors="pt")
@@ -118,6 +128,7 @@ class LLaVAv15Backbone(Backbone):
             "proc_out": proc_out,
             "image": image,
             "prompt": prompt,
+            "past_key_values": None,
         }
 
     def forward_step(
@@ -127,13 +138,63 @@ class LLaVAv15Backbone(Backbone):
     ) -> tuple[Tensor, Tensor]:
         """Single-step forward returning (hidden_state, logits).
 
-        TODO(week-1): wire up KV-cache-aware single-token forward via
-        `model.generate` step or `model.forward` with `use_cache=True`.
-        This is intentionally a NotImplementedError at the Day-1 skeleton stage —
-        the smoke test exercises the Policy interface directly with mock hidden
-        states rather than driving a real LLaVA forward pass.
+        Uses HF's `past_key_values` interface for incremental decoding:
+          - First call (cache is None): runs full prompt + pixel_values, captures
+            the cache from the model output, and returns the LAST token's hidden
+            state and logits.
+          - Subsequent calls: passes only `generated_ids[:, -1:]` along with the
+            cached `past_key_values`. HF computes a single new token's hidden
+            state and logits.
+
+        Args:
+            inputs:        Dict from `prepare_inputs`. The `past_key_values`
+                           slot is mutated in place.
+            generated_ids: [B, t] all tokens decoded so far. On the first call
+                           may be a zero-length tensor (orchestrator hasn't
+                           sampled yet); we ignore it and use the prompt instead.
+
+        Returns:
+            hidden_state:  [B, hidden_dim] last hidden state of the final layer.
+            lm_logits:     [B, vocab_size] raw LM logits at the new token position.
         """
-        raise NotImplementedError(
-            "LLaVAv15Backbone.forward_step is wired in Week 1, after the "
-            "framework-readiness smoke test has validated the surface area."
-        )
+        self._ensure_loaded()
+        model = self._model
+        device = next(model.parameters()).device
+        cache = inputs.get("past_key_values")
+
+        if cache is None:
+            # First step: drive the full prompt + image through the model so
+            # the encoder pass over image patches happens exactly once.
+            proc = inputs["proc_out"]
+            input_ids = proc["input_ids"].to(device)
+            pixel_values = proc["pixel_values"].to(device)
+            attention_mask = proc.get("attention_mask")
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(device)
+            with torch.no_grad():
+                out = model(
+                    input_ids=input_ids,
+                    pixel_values=pixel_values,
+                    attention_mask=attention_mask,
+                    use_cache=True,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+        else:
+            # Incremental step: only the new token. HF threads the cache for us.
+            last_id = generated_ids[:, -1:].to(device)
+            with torch.no_grad():
+                out = model(
+                    input_ids=last_id,
+                    past_key_values=cache,
+                    use_cache=True,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+
+        inputs["past_key_values"] = out.past_key_values
+        # `hidden_states` is a tuple per layer; -1 is the final layer.
+        # Slice last position (the newly produced token) along the seq axis.
+        hidden = out.hidden_states[-1][:, -1, :].contiguous()  # [B, d]
+        logits = out.logits[:, -1, :].contiguous()             # [B, V]
+        return hidden, logits

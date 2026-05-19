@@ -1,0 +1,60 @@
+# DT-SGOD on LLaVA-1.5-7B — the paper-target config.
+#
+# Decode-time hallucination reduction via a dual-timescale slot-recurrent
+# Policy. See docs/dt_sgod_proposal.md for the architecture.
+#
+# Layout follows the framework's 3-layer abstraction: each top-level block
+# names a component (via its registry key) and supplies that component's
+# constructor kwargs.
+
+backbone:
+  name: "llava-1.5-7b"
+  model_id: "llava-hf/llava-1.5-7b-hf"
+  dtype: "float16"
+  device_map: "auto"
+  # Set true on 24 GB cards (single 4090). False on 2× 4090 or H100.
+  load_in_4bit: false
+
+oracle:
+  name: "reltr"
+  checkpoint_path: "data/checkpoints/reltr/checkpoint0149.pth"
+  device: "cuda"
+  confidence_threshold: 0.3
+  top_k: 20
+  # Hybrid mode: open-vocab objects from Grounding DINO, relations from RelTR.
+  # Keeps relation reasoning grounded in RelTR's well-trained 51 predicates
+  # while widening object coverage to the long tail (kitchen, ferris wheel, ...).
+  grounding_dino:
+    enabled: true
+    model_id: "IDEA-Research/grounding-dino-base"
+    box_threshold: 0.25
+    text_threshold: 0.2
+
+policy:
+  name: "dt-sgod"
+  # DTSGODConfig kwargs (slow/fast/ATG hyperparameters).
+  config:
+    num_slots: 8
+    gat_layers: 2
+    gat_heads: 4
+    speaker_attn_dim: 256
+    speaker_lora_rank: 16
+    speaker_gate_init: 0.0       # γ=0 at init ⇒ DT-SGOD = backbone-base. G1 invariant.
+    atg_hidden_dim: 256
+    atg_target_fire_rate: 0.20   # Lagrangian target — ≈ 1 slow-fire per 5 tokens.
+    loss_dpo_beta: 0.10
+    loss_anchor_rate_mu: 0.50
+    loss_slot_disentangle_delta: 0.01
+    seed: 42
+  # Label embedder for Grounding Planner node features.
+  # "clip" uses CLIP text features (recommended for the paper); "hash" is the
+  # md5 baseline kept for fast unit tests.
+  label_embedder:
+    type: "clip"
+    model_name: "ViT-B-32"
+    pretrained: "openai"
+
+runtime:
+  max_new_tokens: 256
+  temperature: 0.0           # Greedy — required for clean A/B against baseline.
+  hidden_buffer_size: 8      # K_t prefix-summary window fed to the slow module.
