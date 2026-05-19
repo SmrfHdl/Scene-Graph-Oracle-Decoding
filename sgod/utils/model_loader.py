@@ -156,10 +156,24 @@ def load_clip_factory(
         cache_path = Path(vocab_cache_path)
         if cache_path.exists():
             cached = torch.load(cache_path, map_location=device, weights_only=True)
-            vocab_embeddings = F.normalize(cached["embeddings"].to(device).float(), dim=-1)
-            vocab_words = cached["words"]
-            vocab_index = {w: i for i, w in enumerate(vocab_words)}
-            logger.info("Loaded vocab cache: %d words", len(vocab_words))
+            cache_dim = int(cached["embeddings"].shape[-1])
+            # Probe the model's text-encoder dim. Mismatch (e.g. ViT-B-32 cache
+            # at 512-dim + ViT-L-14 model at 768-dim) crashes deep inside
+            # score_words; skip the cache and live-encode instead.
+            with torch.no_grad():
+                probe = model.encode_text(tokenizer(["a"]).to(device))
+            model_dim = int(probe.shape[-1])
+            if cache_dim != model_dim:
+                logger.warning(
+                    "Vocab cache at %s has dim=%d but model %s emits dim=%d — "
+                    "falling back to live encoding.",
+                    cache_path, cache_dim, model_name, model_dim,
+                )
+            else:
+                vocab_embeddings = F.normalize(cached["embeddings"].to(device).float(), dim=-1)
+                vocab_words = cached["words"]
+                vocab_index = {w: i for i, w in enumerate(vocab_words)}
+                logger.info("Loaded vocab cache: %d words", len(vocab_words))
         else:
             logger.warning("Vocab cache not found at %s — live encoding will be used", cache_path)
 

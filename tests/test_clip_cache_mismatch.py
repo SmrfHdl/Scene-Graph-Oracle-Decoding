@@ -137,6 +137,43 @@ def test_clipscorer_cache_dim_match_loads_cache(monkeypatch):
     assert scorer._vocab_index["w7"] == 7
 
 
+def test_load_clip_factory_skips_mismatched_cache(monkeypatch, caplog):
+    """load_clip_factory builds CLIP once and stashes the cache into a `_preloaded`
+    dict that bypasses CLIPScorer's own cache check. So the factory itself must
+    detect dim mismatch and drop the cache before stashing — otherwise the smoke
+    test crashes the first time the factory is invoked on an image.
+    """
+    import open_clip
+
+    from sgod.utils.model_loader import load_clip_factory
+
+    monkeypatch.setattr(
+        open_clip, "create_model_and_transforms",
+        lambda *_a, **_k: (_FakeCLIP(text_dim=768, image_dim=768), None, _identity_preprocess),
+    )
+    monkeypatch.setattr(open_clip, "get_tokenizer", lambda _name: _FakeTokenizer())
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cache_path = _write_cache(Path(tmp) / "vocab.pt", n_words=50, dim=512)
+
+        with caplog.at_level("WARNING", logger="sgod.utils.model_loader"):
+            factory = load_clip_factory(
+                model_name="ViT-L-14",
+                vocab_cache_path=str(cache_path),
+                device="cpu",
+            )
+
+    # Invoke the factory to build a CLIPScorer on a fake image; mismatched cache
+    # must have been dropped, so vocab_embeddings is None and no crash occurs.
+    from PIL import Image
+    scorer = factory(Image.new("RGB", (16, 16)))
+    assert scorer._vocab_embeddings is None
+    assert any("dim=512" in r.message and "dim=768" in r.message for r in caplog.records), (
+        f"expected dim-mismatch warning from load_clip_factory; "
+        f"got: {[r.message for r in caplog.records]}"
+    )
+
+
 def test_clipscorer_no_cache_path_works_unchanged(monkeypatch):
     """Regression guard: omitting vocab_cache_path triggers live encoding only."""
     from PIL import Image
