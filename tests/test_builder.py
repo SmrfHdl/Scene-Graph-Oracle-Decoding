@@ -1,64 +1,20 @@
 """Tests for sgod.runtime.builder — config → HallucinationDecoder assembly.
 
-CPU-only. We register lightweight fake Backbone/Oracle/Policy implementations
-into the framework registry so the builder can construct them without
-touching HF/CLIP. The fakes live in this module and clean up after themselves.
+CPU-only. The framework fakes (`test-fake-*`) are registered in
+`tests/conftest.py` so they're available across every test file that
+needs to drive `build_from_config` without HF/CLIP.
 """
 from __future__ import annotations
 
 import pytest
 
-from sgod.core.interfaces import Backbone, Oracle, Policy
-from sgod.core.registry import _REGISTRY, register
-from sgod.core.types import OracleEvidence, SceneGraph
+from sgod.core.registry import _REGISTRY
 from sgod.runtime import HallucinationDecoder, build_from_config
-
-
-# ── Fakes registered under throwaway names ───────────────────────────────────
-
-@register("backbone", "test-fake-backbone")
-class _FakeBackbone(Backbone):
-    def __init__(self, hidden_dim=8, vocab_size=16, lazy=True, **_):
-        self._hidden_dim = hidden_dim
-        self._vocab_size = vocab_size
-        self._lazy = lazy
-
-    @property
-    def hidden_dim(self): return self._hidden_dim
-    @property
-    def vocab_size(self): return self._vocab_size
-    @property
-    def lora_target_modules(self): return []
-    @property
-    def device(self): return "cpu"
-    def tokenizer(self):
-        class _Tok:
-            eos_token_id = 0
-            def decode(self, ids, **__): return ""
-            def batch_decode(self, ids): return [""] * len(ids)
-        return _Tok()
-    def prepare_inputs(self, image, prompt): return {}
-    def forward_step(self, inputs, generated_ids): raise NotImplementedError
-
-
-@register("oracle", "test-fake-oracle")
-class _FakeOracle(Oracle):
-    def __init__(self, msg="ok", **_):
-        self.msg = msg
-    def extract(self, image, image_meta=None):
-        return OracleEvidence(scene_graph=SceneGraph())
-    def vocab_scores(self, tokenizer, evidence): return {}
-
-
-@register("policy", "test-fake-policy")
-class _FakePolicy(Policy):
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-    def init_state(self, evidence): return {}
-    def adjust_logits(self, state):
-        import torch
-        return torch.zeros_like(state.lm_logits)
-    def update_state(self, state, sampled_token_id): return state.policy_state
+from tests.conftest import (
+    FakeBackboneForTests as _FakeBackbone,
+    FakeOracleForTests as _FakeOracle,
+    FakePolicyForTests as _FakePolicy,
+)
 
 
 # ── Smoke: registry kinds ────────────────────────────────────────────────────
@@ -185,3 +141,49 @@ def test_build_unknown_label_embedder_type_raises():
     }
     with pytest.raises(ValueError, match="Unknown label embedder type"):
         build_from_config(config)
+
+
+# ── Production config files validate + dispatch correctly ────────────────────
+
+def test_production_config_dt_sgod_llava15_yaml_parses_and_dispatches():
+    """`configs/dt_sgod_llava15.yaml` builds with stubbed I/O components.
+
+    Replaces the LLaVA backbone and RelTR oracle with the conftest fakes
+    (no GPU, no checkpoints) but keeps the policy + label_embedder blocks
+    intact, so the dispatch into `CLIPTextLabelEmbedder` is exercised
+    against the actual production config — not an in-test dict.
+    """
+    from pathlib import Path
+    from sgod.policies.dt_sgod import CLIPTextLabelEmbedder
+    from sgod.runtime import load_config
+
+    repo_root = Path(__file__).resolve().parent.parent
+    cfg = load_config(repo_root / "configs" / "dt_sgod_llava15.yaml")
+    # Replace heavy components, keep policy block authentic.
+    cfg["backbone"] = {"name": "test-fake-backbone", "hidden_dim": 4096, "vocab_size": 32064}
+    cfg["oracle"] = {"name": "test-fake-oracle"}
+
+    dec = build_from_config(cfg)
+    emb = dec.policy.grounding_planner.label_embedder
+    assert isinstance(emb, CLIPTextLabelEmbedder)
+    # ViT-B-32 is in _KNOWN_DIMS — must resolve to 512 without loading CLIP.
+    assert emb.embed_dim == 512
+    # GP's projection must match the embedder's dim + 5 (bbox(4) + conf(1)).
+    assert dec.policy.grounding_planner.node_proj.in_features == 512 + 5
+
+
+def test_production_config_dt_sgod_llava15_runtime_block_pulled_through():
+    """The runtime block in the YAML (hidden_buffer_size, max_new_tokens, etc.)
+    must reach `HallucinationDecoder` so a deployed config behaves as shipped."""
+    from pathlib import Path
+    from sgod.runtime import load_config
+
+    repo_root = Path(__file__).resolve().parent.parent
+    cfg = load_config(repo_root / "configs" / "dt_sgod_llava15.yaml")
+    cfg["backbone"] = {"name": "test-fake-backbone", "hidden_dim": 4096, "vocab_size": 32064}
+    cfg["oracle"] = {"name": "test-fake-oracle"}
+    dec = build_from_config(cfg)
+    rcfg = cfg.get("runtime", {}) or {}
+    assert dec.max_new_tokens == rcfg.get("max_new_tokens", 256)
+    assert dec.temperature == rcfg.get("temperature", 0.0)
+    assert dec.hidden_buffer_size == rcfg.get("hidden_buffer_size", 8)
