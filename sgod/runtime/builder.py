@@ -51,11 +51,29 @@ def build_from_config(config: dict, *, lazy: bool = True) -> HallucinationDecode
                 When True, heavy model weights are loaded on first forward,
                 not at construction — keeps tests and dry-runs fast.
     """
+    _ensure_components_registered()
     backbone = _build_backbone(config["backbone"], lazy=lazy)
     oracle = _build_oracle(config["oracle"])
     policy = _build_policy(config["policy"], backbone=backbone)
     runtime_cfg = config.get("runtime", {}) or {}
     return HallucinationDecoder(backbone=backbone, oracle=oracle, policy=policy, **runtime_cfg)
+
+
+def _ensure_components_registered() -> None:
+    """Import concrete component packages so their @register decorators fire.
+
+    Lazy-imported (not at module load) so fast unit tests that don't use
+    build_from_config skip the torch/transformers import cost. Failures are
+    swallowed because some components are optional — the actual KeyError
+    raised by the registry lookup is the user-visible signal.
+    """
+    import importlib
+
+    for mod in ("sgod.backbones", "sgod.oracles", "sgod.policies"):
+        try:
+            importlib.import_module(mod)
+        except Exception:  # noqa: BLE001 — best-effort registration
+            pass
 
 
 def load_config(path: str | Path) -> dict:
