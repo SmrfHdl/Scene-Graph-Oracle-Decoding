@@ -119,6 +119,9 @@ def main() -> int:
     ap.add_argument("--student-config", type=Path, required=True)
     ap.add_argument("--ckpt", type=Path, required=True,
                     help="Stage-0 checkpoint (.pt with speaker_adapter + anchor_gate)")
+    ap.add_argument("--teacher-config", type=Path, default=None,
+                    help="Optional SGOD-v1 teacher config — if given, eval 3-way "
+                         "(baseline / SGOD-v1 / DT-SGOD-Stage0)")
     ap.add_argument("--pope-dir", type=Path, default=Path("data/pope"))
     ap.add_argument("--coco-root", type=Path, default=Path("data/coco/val2014"))
     ap.add_argument("--n", type=int, default=100, help="Number of POPE examples")
@@ -152,31 +155,48 @@ def main() -> int:
     # Cheapest way: temporarily zero out the gate to disable Δ entirely.
     baseline_gate_value = policy.speaker_adapter.gate.item()
 
+    # Optional teacher (SGOD v1, training-free).
+    teacher_decoder = None
+    if args.teacher_config is not None:
+        log.info("Building SGOD-v1 teacher from %s", args.teacher_config)
+        teacher_cfg = load_config(args.teacher_config)
+        teacher_decoder = build_from_config(teacher_cfg, lazy=False)
+
     records = []
     for i, ex in enumerate(examples):
         img = Image.open(ex["image_path"]).convert("RGB")
         prompt = f"USER: <image>\n{ex['question']} Answer with yes or no. ASSISTANT:"
 
-        # Baseline: gate = 0 → DT-SGOD ≡ backbone (G1 invariant).
         with torch.no_grad():
+            # Baseline: gate = 0 → DT-SGOD ≡ backbone (G1 invariant).
             policy.speaker_adapter.gate.data.fill_(0.0)
             ans_base = decoder.generate(image=img, prompt=prompt, question=ex["question"])
             policy.speaker_adapter.gate.data.fill_(baseline_gate_value)
             ans_stage0 = decoder.generate(image=img, prompt=prompt, question=ex["question"])
+            ans_teacher = None
+            if teacher_decoder is not None:
+                ans_teacher = teacher_decoder.generate(image=img, prompt=prompt, question=ex["question"])
 
-        records.append({
+        rec = {
             **{k: ex[k] for k in ("image_name", "question", "label", "split")},
             "raw_base": ans_base,
             "raw_stage0": ans_stage0,
             "pred_base": _extract_yes_no(ans_base),
             "pred_stage0": _extract_yes_no(ans_stage0),
-        })
+        }
+        if ans_teacher is not None:
+            rec["raw_teacher"] = ans_teacher
+            rec["pred_teacher"] = _extract_yes_no(ans_teacher)
+        records.append(rec)
         if (i + 1) % 20 == 0 or (i + 1) == len(examples):
             m_b = _metrics(records, "pred_base")
             m_s = _metrics(records, "pred_stage0")
-            log.info("[%d/%d]  base F1=%.3f acc=%.3f  |  stage0 F1=%.3f acc=%.3f  (ΔF1=%+.3f)",
-                     i + 1, len(examples), m_b["f1"], m_b["accuracy"],
-                     m_s["f1"], m_s["accuracy"], m_s["f1"] - m_b["f1"])
+            line = (f"[{i+1}/{len(examples)}]  base F1={m_b['f1']:.3f} acc={m_b['accuracy']:.3f}  |  "
+                    f"stage0 F1={m_s['f1']:.3f} acc={m_s['accuracy']:.3f} (ΔF1={m_s['f1']-m_b['f1']:+.3f})")
+            if teacher_decoder is not None:
+                m_t = _metrics(records, "pred_teacher")
+                line += f"  |  teacher F1={m_t['f1']:.3f} acc={m_t['accuracy']:.3f} (ΔF1={m_t['f1']-m_b['f1']:+.3f})"
+            log.info(line)
 
     base_m = _metrics(records, "pred_base")
     stage0_m = _metrics(records, "pred_stage0")
@@ -184,10 +204,17 @@ def main() -> int:
         "n_examples": len(records),
         "baseline_llava": base_m,
         "dt_sgod_stage0": stage0_m,
-        "f1_delta": round(stage0_m["f1"] - base_m["f1"], 4),
-        "agree_rate": round(sum(1 for r in records if r["pred_base"] == r["pred_stage0"]) / len(records), 4),
+        "f1_delta_stage0": round(stage0_m["f1"] - base_m["f1"], 4),
+        "agree_rate_stage0": round(sum(1 for r in records if r["pred_base"] == r["pred_stage0"]) / len(records), 4),
         "gate_at_ckpt": baseline_gate_value,
     }
+    if teacher_decoder is not None:
+        teacher_m = _metrics(records, "pred_teacher")
+        summary["sgod_v1_teacher"] = teacher_m
+        summary["f1_delta_teacher"] = round(teacher_m["f1"] - base_m["f1"], 4)
+        summary["agree_rate_teacher"] = round(
+            sum(1 for r in records if r["pred_base"] == r["pred_teacher"]) / len(records), 4
+        )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with open(args.out, "w") as f:
         json.dump({"summary": summary, "records": records}, f, indent=2)
