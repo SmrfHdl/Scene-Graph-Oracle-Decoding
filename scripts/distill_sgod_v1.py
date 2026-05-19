@@ -145,20 +145,36 @@ def _phase_train(args: argparse.Namespace) -> int:
 
     prepare_for_stage0(policy, gate_init=args.gate_init)
 
+    # Move policy to GPU if available — the orchestrator does this lazily at
+    # first inference forward, but Stage-0 train never calls the orchestrator
+    # so we do it explicitly. distill_step casts traces to policy.device, so
+    # the only thing this changes is where the SpeakerAdapter / GP / ATG run.
+    if torch.cuda.is_available():
+        policy.to("cuda")
+        log.info("Moved policy to cuda")
+
     opt = torch.optim.AdamW(stage0_trainable_params(policy), lr=args.lr)
     log.info("Starting Stage-0 distillation: epochs=%d lr=%g w_delta=%g w_atg=%g",
              args.epochs, args.lr, args.w_delta, args.w_atg)
 
+    log_every = max(1, len(traces) // 20)  # ~20 progress lines per epoch
     for epoch in range(args.epochs):
         total_loss, total_delta, total_atg, n_steps = 0.0, 0.0, 0.0, 0
-        for t in traces:
+        for i, t in enumerate(traces):
             info = distill_step(policy, t, opt, w_delta=args.w_delta, w_atg=args.w_atg)
             total_loss  += info["loss"]
             total_delta += info["loss_delta"]
             total_atg   += info["loss_atg"]
             n_steps     += 1
+            if (i + 1) % log_every == 0:
+                log.info(
+                    "  epoch %d  step %d/%d  loss=%.4g  L_delta=%.4g  L_atg=%.4g  gate=%.3f  fire=%.3f",
+                    epoch, i + 1, len(traces),
+                    total_loss / n_steps, total_delta / n_steps, total_atg / n_steps,
+                    policy.speaker_adapter.gate.item(), info["fire_prob_mean"],
+                )
         log.info(
-            "epoch %d  loss=%.4g  L_delta=%.4g  L_atg=%.4g  gate=%.3f",
+            "epoch %d DONE  loss=%.4g  L_delta=%.4g  L_atg=%.4g  gate=%.3f",
             epoch, total_loss / n_steps, total_delta / n_steps, total_atg / n_steps,
             policy.speaker_adapter.gate.item(),
         )
