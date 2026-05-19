@@ -18,3 +18,10 @@ dependencies = [
 dev = ["pytest", "pytest-json-report", "ruff"]
 train = ["peft"]  # LoRA for SGOD++
 eval = ["lmms-eval"]
+
+# Tell setuptools to install only the `sgod` package — without this, the
+# flat repo layout (sgod/, data/, configs/, test_imgs/, experiments/) trips
+# the multi-top-level-package guard during editable installs.
+[tool.setuptools.packages.find]
+include = ["sgod*"]
+exclude = ["tests*", "data*", "configs*", "test_imgs*", "experiments*", "scripts*", "outputs*", "docs*"]
