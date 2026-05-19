@@ -4,25 +4,36 @@ Reefknot = relation hallucination benchmark (perceptive + cognitive). This is
 the headline benchmark where our RelTR-backed oracle should *actually* help
 — POPE saturated at LLaVA-7B F1=0.92, so we pivot to relations.
 
-Reefknot format (test.json / val.json):
-    [{"image": "VG_<id>.jpg", "question": "...", "answer": "yes|no",
-      "type": "perceptive|cognitive"}]
+Reefknot YESNO.jsonl format (one record per line):
+    {"image_id": "<VG id>",
+     "query_prompt": "Is ... in this photo? Please answer yes or no.",
+     "label": "yes|no",
+     "relation_type": "perception|cognitive"}
+
+Image filename: data/reefknot/images/<image_id>.jpg (Visual Genome).
 
 Setup (one-time):
-    .venv/bin/python scripts/download_data.py --benchmarks reefknot
+    # 1. YESNO.jsonl from GitHub (~2 MB):
+    mkdir -p data/reefknot
+    curl -L https://raw.githubusercontent.com/JackChen-seu/Reefknot/main/Dataset/YESNO.jsonl \\
+        -o data/reefknot/YESNO.jsonl
 
-    # Visual Genome images (~20 GB):
-    pip install gdown
-    python -c "import gdown; gdown.download_folder(\\
-        'https://drive.google.com/drive/folders/1gQ-reJ4-Q6DFqTRBMVbSQ6_8P5NGQS73', \\
-        output='data/reefknot/images/')"
+    # 2. Visual Genome images (~15 GB total, both parts):
+    mkdir -p data/reefknot/images
+    cd data/reefknot/images
+    wget https://cs.stanford.edu/people/rak248/VG_100K_2/images.zip
+    wget https://cs.stanford.edu/people/rak248/VG_100K_2/images2.zip
+    unzip -q images.zip && unzip -q images2.zip
+    mv VG_100K/* VG_100K_2/* . && rmdir VG_100K VG_100K_2
+    rm images.zip images2.zip
+    cd -
 
 Usage:
     .venv/bin/python scripts/eval_stage0_reefknot.py \\
         --student-config configs/dt_sgod_llava15.yaml \\
         --ckpt outputs/stage0/dtsgod_stage0.pt \\
         --teacher-config configs/sgod_v1_llava15.yaml \\
-        --reefknot-json data/reefknot/test.json \\
+        --reefknot-jsonl data/reefknot/YESNO.jsonl \\
         --image-dir data/reefknot/images \\
         --n 100 --out outputs/stage0/eval_reefknot.json
 """
@@ -47,10 +58,15 @@ from sgod.runtime import HallucinationDecoder, build_from_config, load_config
 log = logging.getLogger("eval_stage0_reefknot")
 
 
-def _load_reefknot(rk_json: Path, image_dir: Path, n: int, seed: int) -> list[dict]:
-    """Load Reefknot examples, resolve image paths, balance by type, sample n."""
-    with open(rk_json) as f:
-        raw = json.load(f)
+def _load_reefknot(rk_jsonl: Path, image_dir: Path, n: int, seed: int) -> list[dict]:
+    """Load Reefknot YESNO examples, resolve image paths, sample n."""
+    raw: list[dict] = []
+    with open(rk_jsonl) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            raw.append(json.loads(line))
     rng = random.Random(seed)
     rng.shuffle(raw)
     out: list[dict] = []
@@ -58,15 +74,16 @@ def _load_reefknot(rk_json: Path, image_dir: Path, n: int, seed: int) -> list[di
     for r in raw:
         if len(out) >= n:
             break
-        img_path = image_dir / r["image"]
+        img_name = f"{r['image_id']}.jpg"
+        img_path = image_dir / img_name
         if not img_path.exists():
             missing += 1
             continue
         out.append({
-            "image_name": r["image"],
-            "question": r["question"],
-            "label": r["answer"].strip().lower(),
-            "type": r.get("type", "unknown"),
+            "image_name": img_name,
+            "question": r["query_prompt"],
+            "label": r["label"].strip().lower(),
+            "type": r.get("relation_type", "unknown"),
             "image_path": str(img_path),
         })
     if missing:
@@ -109,15 +126,15 @@ def main() -> int:
     ap.add_argument("--student-config", type=Path, required=True)
     ap.add_argument("--ckpt", type=Path, required=True)
     ap.add_argument("--teacher-config", type=Path, default=None)
-    ap.add_argument("--reefknot-json", type=Path, default=Path("data/reefknot/test.json"))
+    ap.add_argument("--reefknot-jsonl", type=Path, default=Path("data/reefknot/YESNO.jsonl"))
     ap.add_argument("--image-dir", type=Path, default=Path("data/reefknot/images"))
     ap.add_argument("--n", type=int, default=100)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out", type=Path, default=Path("outputs/stage0/eval_reefknot.json"))
     args = ap.parse_args()
 
-    log.info("Loading %d Reefknot examples from %s ...", args.n, args.reefknot_json)
-    examples = _load_reefknot(args.reefknot_json, args.image_dir, args.n, args.seed)
+    log.info("Loading %d Reefknot examples from %s ...", args.n, args.reefknot_jsonl)
+    examples = _load_reefknot(args.reefknot_jsonl, args.image_dir, args.n, args.seed)
     if len(examples) < args.n:
         log.warning("only %d/%d examples have resolvable images", len(examples), args.n)
     log.info("Will eval on %d examples", len(examples))
@@ -146,7 +163,8 @@ def main() -> int:
     records = []
     for i, ex in enumerate(examples):
         img = Image.open(ex["image_path"]).convert("RGB")
-        prompt = f"USER: <image>\n{ex['question']} Answer yes or no. ASSISTANT:"
+        # Reefknot's query_prompt already contains "Please answer yes or no."
+        prompt = f"USER: <image>\n{ex['question']} ASSISTANT:"
 
         with torch.no_grad():
             policy.speaker_adapter.gate.data.fill_(0.0)
