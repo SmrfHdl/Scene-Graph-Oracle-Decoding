@@ -93,9 +93,15 @@ def distill_step(
         dict with keys 'loss', 'loss_delta', 'loss_atg', 'fire_prob_mean',
         'gate' — for logging.
     """
-    h = trace.hidden_states                  # [B, d]
-    lm_logits = trace.lm_logits              # [B, V]
-    delta_teacher = trace.delta_teacher      # [B, V]
+    # Traces are captured from the teacher backbone (typically fp16 on CUDA);
+    # the student policy is fp32 on whatever device prepare_for_stage0 placed
+    # it on. Cast trace tensors to match the policy — they're inputs with no
+    # autograd graph, so casting is free.
+    policy_dtype = next(policy.speaker_adapter.parameters()).dtype
+    policy_device = next(policy.speaker_adapter.parameters()).device
+    h = trace.hidden_states.to(device=policy_device, dtype=policy_dtype)
+    lm_logits = trace.lm_logits.to(device=policy_device, dtype=policy_dtype)
+    delta_teacher = trace.delta_teacher.to(device=policy_device, dtype=policy_dtype)
     evidence = trace.evidence
     device = h.device
     B = h.shape[0]
