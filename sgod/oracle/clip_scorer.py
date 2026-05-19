@@ -21,6 +21,18 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 
+def _probe_text_dim(model, tokenizer, device: str) -> int:
+    """Encode a single probe token to learn the model's text embedding dim.
+
+    Cheaper than threading a config through every code path. Used to guard
+    against cache/model dim mismatches at load time.
+    """
+    with torch.no_grad():
+        tokens = tokenizer(["a"]).to(device)
+        feat = model.encode_text(tokens)
+    return int(feat.shape[-1])
+
+
 class CLIPScorer:
     """CLIP visual-text scorer.
 
@@ -81,12 +93,26 @@ class CLIPScorer:
                 cache_path = Path(vocab_cache_path)
                 if cache_path.exists():
                     cached = torch.load(cache_path, map_location=self.device, weights_only=True)
-                    self._vocab_embeddings = F.normalize(
-                        cached["embeddings"].to(self.device).float(), dim=-1
-                    )  # [V, D]
-                    self._vocab_words = cached["words"]
-                    self._vocab_index = {w: i for i, w in enumerate(self._vocab_words)}
-                    logger.info("Loaded vocab cache: %d words", len(self._vocab_words))
+                    cache_dim = int(cached["embeddings"].shape[-1])
+                    model_dim = _probe_text_dim(self._model, self._tokenizer, self.device)
+                    if cache_dim != model_dim:
+                        # Common failure mode: cache was generated for ViT-B-32
+                        # (512-dim) but the scorer is now loading ViT-L-14
+                        # (768-dim). Silently falling through with a mismatched
+                        # cache previously caused a runtime matmul error deep
+                        # inside the score path. Drop the cache and live-encode.
+                        logger.warning(
+                            "Vocab cache at %s has dim=%d but model %s emits dim=%d — "
+                            "falling back to live encoding.",
+                            cache_path, cache_dim, model_name, model_dim,
+                        )
+                    else:
+                        self._vocab_embeddings = F.normalize(
+                            cached["embeddings"].to(self.device).float(), dim=-1
+                        )  # [V, D]
+                        self._vocab_words = cached["words"]
+                        self._vocab_index = {w: i for i, w in enumerate(self._vocab_words)}
+                        logger.info("Loaded vocab cache: %d words", len(self._vocab_words))
                 else:
                     logger.warning("Vocab cache not found at %s — live encoding will be used", cache_path)
 
