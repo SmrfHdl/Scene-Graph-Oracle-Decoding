@@ -92,18 +92,25 @@ def main() -> int:
     print(f"  examples with EMPTY scene graph: {empty}/{len(n_objs)} ({100*empty/len(n_objs):.1f}%)")
 
     # 5. Verdict
+    #
+    # We treat the *effective* anchor rate as the share of steps where the
+    # teacher actually injected a non-zero Δ — this is the real Stage-0
+    # supervision signal. `rule_anchor_type` is a separate (currently
+    # unwired) ATG warmup label; absence does NOT mean the oracle is dead.
     print("\n=== Verdict ===")
     issues = []
+    effective_rate = nonzero_per_step.mean().item()
     if n < 5000:
         issues.append(f"low volume ({n} steps) — recommend ≥ 10k")
-    if fire_rate < 0.05:
-        issues.append(f"anchor fire rate too low ({fire_rate:.3f}) — oracle barely fires")
-    if nonzero_per_step.mean().item() < 0.05:
-        issues.append(f"Δ non-zero rate too low ({nonzero_per_step.mean():.3f})")
+    if effective_rate < 0.05:
+        issues.append(f"Δ non-zero rate too low ({effective_rate:.3f}) — oracle barely fires")
     if empty / max(len(n_objs), 1) > 0.3:
         issues.append(f"too many empty scene graphs ({empty}/{len(n_objs)})")
     if abs_max_per_step.max().item() > 100:
         issues.append(f"Δ magnitude exploded (max {abs_max_per_step.max():.1f}) — instability")
+    if fire_rate < 0.01 and effective_rate > 0.05:
+        print("  NOTE: rule_anchor_type is unwired in the orchestrator — using Δ non-zero rate")
+        print(f"        as the effective anchor signal ({effective_rate:.3f}).")
 
     if not issues:
         print("  OK — traces look healthy. Proceed to `distill_sgod_v1.py train`.")
