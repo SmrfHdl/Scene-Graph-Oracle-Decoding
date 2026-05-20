@@ -242,3 +242,114 @@ def test_zoom_apply_requires_attentions():
 def test_visual_action_cannot_be_instantiated():
     with pytest.raises(TypeError):
         VisualAction()  # abstract
+
+
+# ── AddSoMMarks ────────────────────────────────────────────────────────────
+
+
+def test_som_parse_xy_typical():
+    from sgod.policies.vrtts.actions.som import _parse_xy
+    x, y = _parse_xy("Is the cow above the field?")
+    assert x == "cow"
+    assert "field" in (y or "")
+
+
+def test_som_parse_xy_unparseable():
+    from sgod.policies.vrtts.actions.som import _parse_xy
+    x, y = _parse_xy("???")
+    # Should not raise — returns best-effort
+    assert isinstance(x, (str, type(None)))
+    assert isinstance(y, (str, type(None)))
+
+
+def test_som_requires_oracle():
+    from sgod.policies.vrtts.actions.som import AddSoMMarks
+    img = Image.new("RGB", (100, 100))
+    state = VisualState(image=img, original_image=img)
+    a = AddSoMMarks()
+    with pytest.raises(ValueError):
+        a.apply(state, question="Is the cow above the field?")
+
+
+def test_som_no_objects_detected_returns_unchanged_state():
+    """If GD detects nothing, the state should still be returned (no crash)."""
+    from sgod.policies.vrtts.actions.som import AddSoMMarks
+    a = AddSoMMarks()
+
+    class _BatchEncoding(dict):
+        def __init__(self):
+            super().__init__()
+            self.input_ids = torch.zeros(1, 1, dtype=torch.long)
+        def to(self, device):
+            return self
+        def keys(self):
+            return iter(())
+
+    class _FakeProcessor:
+        def __call__(self, images, text, return_tensors):
+            return _BatchEncoding()
+        def post_process_grounded_object_detection(self, outputs, input_ids,
+                                                    threshold, text_threshold,
+                                                    target_sizes):
+            return [{"scores": torch.empty(0), "boxes": torch.empty(0, 4), "labels": []}]
+
+    class _FakeModel:
+        def __call__(self, **kwargs):
+            return object()
+
+    class _FakeOracle:
+        device = "cpu"
+        processor = _FakeProcessor()
+        model = _FakeModel()
+
+    img = Image.new("RGB", (100, 100))
+    state = VisualState(image=img, original_image=img)
+    out = a.apply(state, question="Is the cow above the field?", oracle=_FakeOracle())
+    # Image unchanged (no marks drawn), prompt suffix empty.
+    assert out.prompt_suffix == ""
+    assert out.metadata["som_marks"] == []
+
+
+# ── AskSubQuestion ─────────────────────────────────────────────────────────
+
+
+def test_subq_requires_backbone():
+    from sgod.policies.vrtts.actions.subquestion import AskSubQuestion
+    a = AskSubQuestion()
+    img = Image.new("RGB", (100, 100))
+    state = VisualState(image=img, original_image=img)
+    with pytest.raises(ValueError):
+        a.apply(state, question="Is the cow above the field?")
+
+
+def test_subq_build_with_no_xy_returns_state_unchanged():
+    from sgod.policies.vrtts.actions.subquestion import AskSubQuestion
+    a = AskSubQuestion()
+    sub = a._build_subqs(None, None)
+    assert sub == []
+
+
+def test_subq_build_with_both_xy():
+    from sgod.policies.vrtts.actions.subquestion import AskSubQuestion
+    a = AskSubQuestion(max_subq=2)
+    sub = a._build_subqs("cat", "mat")
+    assert len(sub) == 2
+    assert "cat" in sub[0]
+    assert "mat" in sub[1]
+
+
+def test_subq_max_subq_limit():
+    from sgod.policies.vrtts.actions.subquestion import AskSubQuestion
+    a = AskSubQuestion(max_subq=1)
+    sub = a._build_subqs("cat", "mat")
+    assert len(sub) == 1
+
+
+def test_subq_skip_template_when_var_missing():
+    from sgod.policies.vrtts.actions.subquestion import AskSubQuestion
+    a = AskSubQuestion(max_subq=4, templates=(
+        "Where is the {X}?", "Where is the {Y}?",
+    ))
+    sub = a._build_subqs("cat", None)
+    # Only the X template should fire.
+    assert sub == ["Where is the cat?"]

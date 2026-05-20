@@ -89,16 +89,28 @@ class VRTTSDecoder:
         self.confidence_threshold = confidence_threshold
         self.prompt_template = prompt_template
 
+    def _build_prompt(self, question: str, suffix: str = "") -> str:
+        """Compose the main-question prompt with optional action-injected suffix."""
+        base = self.prompt_template.format(question=question)
+        if not suffix:
+            return base
+        # Insert suffix BEFORE "ASSISTANT:" so the LM sees it as context.
+        marker = "ASSISTANT:"
+        idx = base.rfind(marker)
+        if idx < 0:
+            return base + " " + suffix
+        return base[:idx] + suffix.strip() + " " + base[idx:]
+
     def _forward(
         self,
-        image: Image.Image,
+        state: VisualState,
         question: str,
         *,
         emit_attentions: bool,
     ) -> tuple[torch.Tensor, dict[str, Any] | None]:
         """Run a single first-step forward. Returns (logits, attn_bundle | None)."""
-        prompt = self.prompt_template.format(question=question)
-        inputs = self.backbone.prepare_inputs(image=image, prompt=prompt)
+        prompt = self._build_prompt(question, state.prompt_suffix)
+        inputs = self.backbone.prepare_inputs(image=state.image, prompt=prompt)
         if emit_attentions:
             _, logits, attns, meta = self.backbone.forward_first_step_with_attentions(inputs)
             bundle = {
@@ -128,7 +140,7 @@ class VRTTSDecoder:
 
         for step_idx in range(self.max_steps):
             logits, attn_bundle = self._forward(
-                state.image, question, emit_attentions=need_attn_next
+                state, question, emit_attentions=need_attn_next
             )
             label, conf = self.confidence.score(logits)
             trace.append(
