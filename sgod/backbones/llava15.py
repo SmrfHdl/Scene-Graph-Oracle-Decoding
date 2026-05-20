@@ -198,3 +198,105 @@ class LLaVAv15Backbone(Backbone):
         hidden = out.hidden_states[-1][:, -1, :].contiguous()  # [B, d]
         logits = out.logits[:, -1, :].contiguous()             # [B, V]
         return hidden, logits
+
+    def forward_first_step_with_attentions(
+        self,
+        inputs: dict[str, Any],
+    ) -> tuple[Tensor, Tensor, tuple[Tensor, ...], dict[str, Any]]:
+        """First-step forward emitting attentions for VR-TTS visual grounding.
+
+        Differs from `forward_step` in three ways:
+          1. Always runs the first (full-prompt + image) pass — KV cache must be None.
+          2. Sets `output_attentions=True` so the model emits per-layer attention.
+          3. Returns extra metadata (image-token positions, attention) needed to
+             map LM attention back onto image patches.
+
+        Only used by `VRTTSDecoder` when an action needs to inspect where the
+        model looked. Does not pollute the abstract `Backbone` interface.
+
+        Returns:
+            hidden:      [B, hidden_dim] last hidden state at the final token.
+            logits:      [B, vocab_size] logits at the final token.
+            attentions:  tuple of [B, n_heads, seq_len, seq_len] per layer.
+            meta:        dict with:
+                - "input_ids": [B, seq_len] full prompt ids
+                - "image_token_positions": list[int] indices of visual tokens in seq
+                - "seq_len": int
+        """
+        self._ensure_loaded()
+        model = self._model
+        device = next(model.parameters()).device
+        if inputs.get("past_key_values") is not None:
+            raise RuntimeError(
+                "forward_first_step_with_attentions requires a fresh inputs dict "
+                "with past_key_values=None. Call backbone.prepare_inputs() again."
+            )
+
+        proc = inputs["proc_out"]
+        input_ids = proc["input_ids"].to(device)
+        pixel_values = proc["pixel_values"].to(device)
+        attention_mask = proc.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device)
+
+        with torch.no_grad():
+            out = model(
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                attention_mask=attention_mask,
+                use_cache=True,
+                output_hidden_states=True,
+                output_attentions=True,
+                return_dict=True,
+            )
+
+        inputs["past_key_values"] = out.past_key_values
+        hidden = out.hidden_states[-1][:, -1, :].contiguous()
+        logits = out.logits[:, -1, :].contiguous()
+        attentions = out.attentions  # tuple per layer
+
+        # Locate visual tokens. LLaVA-1.5 expands a single <image> placeholder
+        # token into 576 visual tokens (24x24) during the model forward. The
+        # input_ids contain the original placeholder; after expansion the
+        # visual tokens occupy a contiguous span starting at the placeholder.
+        image_token_id = getattr(model.config, "image_token_index", None)
+        if image_token_id is None:
+            # Some LLaVA configs use `image_token_id`; fall back.
+            image_token_id = getattr(model.config, "image_token_id", None)
+        if image_token_id is None:
+            raise RuntimeError(
+                "Cannot locate image_token_index in model.config — needed to "
+                "find visual-token positions."
+            )
+
+        ids_row = input_ids[0].tolist()
+        # Position of the placeholder in the original input_ids:
+        placeholder_positions = [i for i, t in enumerate(ids_row) if t == image_token_id]
+        if len(placeholder_positions) != 1:
+            raise RuntimeError(
+                f"Expected exactly one image placeholder, found {len(placeholder_positions)}."
+            )
+        placeholder_pos = placeholder_positions[0]
+        # The expanded sequence has 576 visual tokens inserted at placeholder_pos
+        # (replacing the single placeholder).
+        num_patches = 576  # LLaVA-1.5 24x24 CLIP-ViT-L/14 grid
+        image_token_positions = list(range(placeholder_pos, placeholder_pos + num_patches))
+
+        # Sanity: total seq_len should match input_ids_length - 1 + 576.
+        seq_len = attentions[0].shape[-1]
+        expected = len(ids_row) - 1 + num_patches
+        if seq_len != expected:
+            raise RuntimeError(
+                f"Expanded seq_len mismatch: got {seq_len}, expected {expected}. "
+                "LLaVA visual expansion convention may have changed."
+            )
+
+        meta = {
+            "input_ids": input_ids,
+            "image_token_positions": image_token_positions,
+            "seq_len": seq_len,
+            "num_patches": num_patches,
+            "grid_size": 24,
+            "placeholder_pos": placeholder_pos,
+        }
+        return hidden, logits, attentions, meta
