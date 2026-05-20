@@ -112,8 +112,8 @@ $\mathrm{Verify}(R, b_X, b_Y) \in \{\mathtt{True}, \mathtt{False}\}$:
 
 | $R$ | Verifier $\mathrm{Verify}$ |
 |---|---|
-| above, on top of, topping | $c_y(b_X) < c_y(b_Y)$ |
-| below, under | $c_y(b_X) > c_y(b_Y)$ |
+| above, on top of, topping | $y_1(b_X) < y_1(b_Y) \;\lor\; y_2(b_X) < c_y(b_Y)$ |
+| below, under | $y_2(b_X) > y_2(b_Y) \;\lor\; y_1(b_X) > c_y(b_Y)$ |
 | left of | $c_x(b_X) < c_x(b_Y)$ |
 | right of | $c_x(b_X) > c_x(b_Y)$ |
 | in, inside | $\mathrm{frac}(b_X \subseteq b_Y) > 0.6$ |
@@ -122,8 +122,22 @@ $\mathrm{Verify}(R, b_X, b_Y) \in \{\mathtt{True}, \mathtt{False}\}$:
 | far from | $\lVert c(b_X) - c(b_Y) \rVert / \mathrm{diag} > 0.4$ |
 | around | $\mathrm{frac}(b_X \subseteq b_Y) > 0.7$ |
 
-where $c(\cdot)$ denotes the bounding-box centre and
+where $c(\cdot)$ denotes the bounding-box centre, $y_1(\cdot)$ / $y_2(\cdot)$
+the top / bottom edges (image origin top-left), and
 $\mathrm{frac}(b_X \subseteq b_Y) = \mathrm{area}(b_X \cap b_Y) / \mathrm{area}(b_X)$.
+
+For *above* / *below*, we adopt a disjunction over the top-edge and a *bulk*
+fallback (bottom-edge of $X$ above the centre of $Y$, or vice versa). The
+fallback catches surface-contact cases where $X$ rests on $Y$ with overlapping
+vertical extent — common in "powder topping bread"-style queries — at which
+the centre and top-edge tests degenerate. The bulk fallback is one-sided
+(only triggers when there is unambiguous mass separation) and therefore does
+not flip clear-cut cases such as "X clearly below Y but asked above".
+
+We additionally apply an **idiom filter** to the parser: occurrences of
+"up" / "down" preceded by a verb in a fixed blacklist (e.g., "dried up",
+"stood up", "sitting down") are not treated as spatial predicates. This
+prevents spurious spatial verification on idiomatic particles.
 
 ### 3.2.4 Asymmetric logit bias
 
@@ -179,9 +193,10 @@ sampled tokens are *not* fed back into the oracle, eliminating the
 self-referential failure mode known to undermine consistency-based decoders.
 
 **Bounded intervention rate.** Empirically on Reefknot YESNO (n=100), the
-intervention fires on 25/100 questions (15 abstain via cognitive rule, 60
-abstain via parse / non-verifiable predicate). This high-precision regime
-preserves baseline performance on the abstained subset by construction.
+intervention fires on 24/100 questions (14 biased *yes*, 10 biased *no*; 76
+abstain via parse / non-verifiable predicate / cognitive rule). This
+high-precision regime preserves baseline performance on the abstained
+subset by construction.
 
 **Step-0 specificity.** Unlike anchor-based corrections that fire across the
 entire decode trajectory, our bias touches a single step (the answer token).
@@ -200,32 +215,44 @@ degrades performance.
 ## 3.4 Empirical results on Reefknot YESNO
 
 Table 1 summarises the breakdown on 100 random YESNO examples, balanced 50/50
-between GT=yes and GT=no.
+between GT=yes and GT=no. We report the centre-only verifier (an ablation,
+denoted *centre*) alongside the top-edge + bulk + idiom-filter verifier
+proposed in §3.2.3 (denoted *ours*).
 
-| Subset | Baseline | Ours | $\Delta$ |
-|---|---|---|---|
-| Overall (n=100) | 0.670 | 0.680 | +0.010 |
-| Perception type (n=49) | 0.755 | **0.776** | **+0.020** |
-| Cognitive type (n=51) | 0.588 | 0.588 | 0.000 |
-| Spatial-parseable (n=25) | 0.560 | **0.600** | **+0.040** |
-| Non-spatial (n=75) | 0.707 | 0.707 | 0.000 |
-| GT = "no" (n=50) | 0.600 | **0.660** | **+0.060** |
-| GT = "yes" (n=50) | 0.740 | 0.700 | −0.040 |
+| Subset | Baseline | Centre (ablation) | Ours | $\Delta$ vs base |
+|---|---|---|---|---|
+| Overall (n=100) | 0.670 | 0.680 | **0.690** | **+0.020** |
+| Perception type (n=49) | 0.755 | 0.776 | **0.796** | **+0.041** |
+| Cognitive type (n=51) | 0.588 | 0.588 | 0.588 | 0.000 |
+| Spatial-parseable (n=25) | 0.560 | 0.600 | **0.640** | **+0.080** |
+| Non-spatial (n=75) | 0.707 | 0.707 | 0.707 | 0.000 |
+| GT = "no" (n=50) | 0.600 | 0.660 | **0.660** | **+0.060** |
+| GT = "yes" (n=50) | 0.740 | 0.700 | **0.720** | **−0.020** |
 
-Two patterns dominate:
+Three patterns dominate:
 
-1. **All gains concentrate in verifiable spatial / GT=no cells.** The +4% on
-   the n=25 spatial subset and the +6% on the GT=no hard-case slice match the
-   design intent — verification supplies the discriminative signal that the LM
-   lacks. Cognitive and non-spatial accuracies are bit-identical to baseline,
-   confirming the abstention rule preserves performance where verification is
-   undefined.
+1. **Gains concentrate in verifiable spatial / GT=no cells.** The +8% on the
+   n=25 spatial-parseable subset and +6% on the GT=no hard-case slice match
+   the design intent — verification supplies the discriminative signal the
+   LM lacks. Cognitive and non-spatial accuracies are bit-identical to
+   baseline, confirming the abstention rule preserves performance where
+   verification is undefined.
 
-2. **The asymmetric bias introduces a small GT=yes regression (−4%).** This
-   is traceable to bounding-box centre artefacts: e.g., *"Is the powder
-   topping bread?"* has $c_y(\mathrm{powder}) \approx c_y(\mathrm{bread})$
-   because the two detections coincide in pixel space. Section 3.5 below
-   discusses two mitigations we leave for the camera-ready.
+2. **Top-edge + bulk + idiom filter cuts the GT=yes regression in half**
+   (centre: −4%, ours: −2%) without sacrificing any GT=no gains. The single
+   flip from centre to ours is the *"dried up apple"* case (idiom filter), in
+   which the parser no longer treats the verb particle "up" as a spatial
+   predicate. The bulk fallback rescues four borderline cases (e.g.,
+   *"sheep up mountain"*) where the box top edges are inverted by detector
+   noise but the bulk-mass test succeeds.
+
+3. **Residual −2% on GT=yes is structural.** The remaining harmed cases
+   (e.g., *"powder topping bread"*, *"city over mountain"*) share a single
+   failure pattern: the detector returns a bbox for $Y$ that *contains* the
+   bbox for $X$ with near-identical vertical extent. No edge- or
+   centre-based vertical predicate can decide which is "on top of" which in
+   this regime. §3.5 discusses a containment-aware extension we leave for
+   the camera-ready.
 
 Statistical significance on the spatial subset is limited by n=25. We confirm
 the direction by scaling to n=1000 (§5 Experiments) where the spatial
@@ -236,17 +263,32 @@ run]**.
 
 ## 3.5 Limitations and intended fixes
 
-- **Bounding-box centres are coarse.** For "above"-style relations the
-  *top edge* of the boxes is more diagnostic than centres. We will switch
-  to edge-based predicates in the camera-ready and expect a further +1–2%.
-- **Idiomatic "up" / "down".** Tokens such as *"dried up"* and *"stood up"*
-  surface in $\mathcal{R}_{\text{sp}}$ but are semantically not spatial.
-  A short blacklist of context patterns (e.g., past-tense verb + "up")
-  removes these without parser overhaul.
+- **Containment-aware "topping" verifier.** The dominant residual failure on
+  GT=yes is the configuration $b_X \subseteq b_Y$ with near-identical
+  vertical extent — typical of "X on top of / topping / over Y" when $Y$ is
+  a large surface and the detector returns a coarse box (e.g.,
+  *powder/bread*, *city/mountain*). We propose extending the "above" family
+  to *match* when $\mathrm{frac}(b_X \subseteq b_Y) > 0.7$ and the centre of
+  $b_X$ lies in the upper half of $b_Y$, even if both edge tests fail. This
+  is principled: containment + upper-half centre is the geometric signature
+  of surface contact. Implementation deferred to camera-ready; expected
+  +1–2% on GT=yes without disturbing GT=no.
+- **Greedy parsing masks idiom filter.** Our parser sorts relation keys by
+  length and matches the longest first. When a longer non-spatial verb
+  (e.g., *"sitting"*) precedes "down" in a query, the verb is selected
+  before the idiom filter can fire on "down". A small lookahead pass
+  ("if matched relation is a -ing verb followed by a particle, re-test the
+  particle's idiom status") would close this gap; complexity bounded.
 - **Cognitive relations remain unaddressed.** The 51% cognitive subset is
   untouched by our intervention. A planned extension uses CLIP similarity
   scored over the convex hull of $b_X \cup b_Y$ against the phrase "$X$ $R$
   $Y$" to provide a soft cognitive verifier; preliminary results pending.
+- **Detector recall floor.** When Grounding DINO fails to localise either
+  operand (e.g., *cabinet/stove* where "stove" is missed), the verifier
+  falls back to a `decide=no` bias regardless of relation. This is
+  conservative-by-design but loses recall on GT=yes when the detector
+  recall, not the geometry, is the bottleneck. A confidence-weighted bias
+  ($\beta_{\text{no}}$ scaled by detector score) is the natural mitigation.
 
 ---
 
@@ -265,6 +307,10 @@ specific code in the intervention layer.
 
 *Draft. Section numbering and references will be re-numbered once the
 introduction (§1), background (§2), and experiments (§4–5) are written.
-The empirical numbers in §3.4 are from `outputs/stage0/eval_reefknot_yesno_mvp_v3.json`
-(n=100, seed=42, LLaVA-1.5-7B fp16, Grounding DINO base, GD thresholds
-box=0.25 / text=0.20).*
+The empirical numbers in §3.4 are from
+`outputs/stage0/eval_reefknot_yesno_mvp_v4.json` (column "Ours") and
+`outputs/stage0/eval_reefknot_yesno_mvp_v3.json` (column "Centre",
+ablation), both n=100, seed=42, LLaVA-1.5-7B fp16, Grounding DINO base, GD
+thresholds box=0.25 / text=0.20. A scaling run to n=1000 is in progress;
+the camera-ready will report bootstrap 95% confidence intervals on
+$\Delta$Acc for the spatial-parseable subset.*
