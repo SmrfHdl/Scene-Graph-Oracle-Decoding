@@ -41,6 +41,7 @@ def load_llava(
     device_map: str = "auto",
     load_in_4bit: bool = False,
     max_memory: dict | None = None,
+    attn_implementation: str | None = None,
 ) -> tuple[Any, Any]:
     """Load LLaVA-1.5-7B model + processor.
 
@@ -72,6 +73,10 @@ def load_llava(
         )
     else:
         kwargs["torch_dtype"] = dtype
+    if attn_implementation is not None:
+        # "eager" required when callers need output_attentions=True (e.g., VR-TTS).
+        # Default (None) lets HF pick sdpa/flash-attn for speed.
+        kwargs["attn_implementation"] = attn_implementation
 
     model = LlavaForConditionalGeneration.from_pretrained(model_id, **kwargs)
     model.eval()

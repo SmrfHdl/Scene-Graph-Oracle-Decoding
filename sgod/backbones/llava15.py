@@ -57,11 +57,13 @@ class LLaVAv15Backbone(Backbone):
         lazy: bool = True,
         hidden_dim_override: int | None = None,
         vocab_size_override: int | None = None,
+        attn_implementation: str | None = None,
     ) -> None:
         self.model_id = model_id
         self.dtype = dtype
         self.device_map = device_map
         self.load_in_4bit = load_in_4bit
+        self.attn_implementation = attn_implementation
         self._lazy = lazy
         self._model: Any | None = None
         self._processor: Any | None = None
@@ -85,6 +87,7 @@ class LLaVAv15Backbone(Backbone):
             dtype=torch_dtype,
             device_map=self.device_map,
             load_in_4bit=self.load_in_4bit,
+            attn_implementation=self.attn_implementation,
         )
 
     # ── interface ─────────────────────────────────────────────────────────
@@ -254,14 +257,19 @@ class LLaVAv15Backbone(Backbone):
         hidden = out.hidden_states[-1][:, -1, :].contiguous()
         logits = out.logits[:, -1, :].contiguous()
         attentions = out.attentions  # tuple per layer
+        if attentions is None or attentions[0] is None:
+            raise RuntimeError(
+                "Model returned no attentions — likely SDPA / flash-attn backend. "
+                "Instantiate LLaVAv15Backbone with attn_implementation='eager'."
+            )
 
-        # Locate visual tokens. LLaVA-1.5 expands a single <image> placeholder
-        # token into 576 visual tokens (24x24) during the model forward. The
-        # input_ids contain the original placeholder; after expansion the
-        # visual tokens occupy a contiguous span starting at the placeholder.
+        # Locate visual tokens. The HF LLaVA processor (for llava-hf/llava-1.5-7b-hf
+        # and similar) ALREADY expands the single <image> placeholder into 576
+        # image_token_id tokens in input_ids; the model passes those through.
+        # So we simply enumerate input_ids and collect the positions whose
+        # token id matches image_token_id.
         image_token_id = getattr(model.config, "image_token_index", None)
         if image_token_id is None:
-            # Some LLaVA configs use `image_token_id`; fall back.
             image_token_id = getattr(model.config, "image_token_id", None)
         if image_token_id is None:
             raise RuntimeError(
@@ -270,25 +278,18 @@ class LLaVAv15Backbone(Backbone):
             )
 
         ids_row = input_ids[0].tolist()
-        # Position of the placeholder in the original input_ids:
-        placeholder_positions = [i for i, t in enumerate(ids_row) if t == image_token_id]
-        if len(placeholder_positions) != 1:
-            raise RuntimeError(
-                f"Expected exactly one image placeholder, found {len(placeholder_positions)}."
-            )
-        placeholder_pos = placeholder_positions[0]
-        # The expanded sequence has 576 visual tokens inserted at placeholder_pos
-        # (replacing the single placeholder).
+        image_token_positions = [i for i, t in enumerate(ids_row) if t == image_token_id]
         num_patches = 576  # LLaVA-1.5 24x24 CLIP-ViT-L/14 grid
-        image_token_positions = list(range(placeholder_pos, placeholder_pos + num_patches))
-
-        # Sanity: total seq_len should match input_ids_length - 1 + 576.
-        seq_len = attentions[0].shape[-1]
-        expected = len(ids_row) - 1 + num_patches
-        if seq_len != expected:
+        if len(image_token_positions) != num_patches:
             raise RuntimeError(
-                f"Expanded seq_len mismatch: got {seq_len}, expected {expected}. "
-                "LLaVA visual expansion convention may have changed."
+                f"Expected {num_patches} image tokens in input_ids, found "
+                f"{len(image_token_positions)}."
+            )
+
+        seq_len = attentions[0].shape[-1]
+        if seq_len != len(ids_row):
+            raise RuntimeError(
+                f"Attention seq_len {seq_len} != len(input_ids) {len(ids_row)}."
             )
 
         meta = {
@@ -297,6 +298,5 @@ class LLaVAv15Backbone(Backbone):
             "seq_len": seq_len,
             "num_patches": num_patches,
             "grid_size": 24,
-            "placeholder_pos": placeholder_pos,
         }
         return hidden, logits, attentions, meta

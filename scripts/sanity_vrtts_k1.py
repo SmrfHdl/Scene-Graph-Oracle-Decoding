@@ -25,9 +25,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 from PIL import Image
 
+from sgod.backbones.llava15 import LLaVAv15Backbone
 from sgod.policies.vrtts import VRTTSDecoder, ConfidenceEstimator
 from sgod.policies.vrtts.actions.zoom import ZoomToAttentionRegion
-from sgod.runtime import build_from_config, load_config
 
 log = logging.getLogger("sanity_k1")
 
@@ -62,8 +62,7 @@ def main() -> int:
                         datefmt="%H:%M:%S")
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--student-config", type=Path,
-                    default=Path("configs/sgod_v1_llava15.yaml"))
+    ap.add_argument("--model-id", type=str, default="llava-hf/llava-1.5-7b-hf")
     ap.add_argument("--reefknot-jsonl", type=Path,
                     default=Path("data/reefknot/YESNO.jsonl"))
     ap.add_argument("--image-dir", type=Path,
@@ -75,9 +74,14 @@ def main() -> int:
     examples = _load_examples(args.reefknot_jsonl, args.image_dir, args.n, args.seed)
     log.info("Sanity n=%d examples", len(examples))
 
-    cfg = load_config(args.student_config)
-    decoder_runtime = build_from_config(cfg, lazy=False)
-    backbone = decoder_runtime.backbone
+    log.info("Loading LLaVA backbone with attn_implementation='eager'...")
+    backbone = LLaVAv15Backbone(
+        model_id=args.model_id,
+        dtype="float16",
+        device_map="auto",
+        lazy=False,
+        attn_implementation="eager",
+    )
     tokenizer = backbone.tokenizer()
 
     yes_ids = [tokenizer.convert_tokens_to_ids(t) for t in ("Yes", "▁Yes", "yes", "▁yes")]
