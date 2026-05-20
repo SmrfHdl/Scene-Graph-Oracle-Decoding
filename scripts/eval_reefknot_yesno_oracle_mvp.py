@@ -207,7 +207,7 @@ def main() -> int:
         prompt = f"USER: <image>\n{ex['question']} ASSISTANT:"
 
         # 1. Scene graph (one Oracle.extract per example).
-        evidence = oracle.extract(image=img, prompt=prompt, question=ex["question"])
+        evidence = oracle.extract(image=img)
         sg_labels = {o.label.lower() for o in evidence.scene_graph.objects}
 
         # 2. Parse question.
