@@ -27,20 +27,24 @@ from dataclasses import dataclass
 class ALVCConfig:
     """ALVC connector hyperparameters.
 
+    Defaults are set for Phi-3.5-vision-instruct (microsoft/Phi-3.5-vision-instruct):
+        - CLIP ViT-L/14-336 vision encoder: 144 tokens per crop, image_dim_out=1024
+        - Phi-3.5-mini LM: hidden_size=3072
+        - Phase 0 fixes num_crops=1, so n_visual_patches = 144
+
     Attributes:
-        n_visual_patches: Number of patches from vision encoder (e.g. 256 for
-            SigLIP-SO400M-patch14-384).
-        d_v: Vision feature dimension (e.g. 1152 for SigLIP-SO400M).
-        d_lm: LM input dimension (e.g. 2560 for Phi-2).
-        k_min: Minimum K.
+        n_visual_patches: Number of patches from vision encoder per crop.
+        d_v: Vision feature dimension (image_dim_out).
+        d_lm: LM input dimension (hidden_size).
+        k_min: Minimum K (typically 1).
         k_max: Maximum K (typically = n_visual_patches).
     """
 
-    n_visual_patches: int = 256
-    d_v: int = 1152
-    d_lm: int = 2560
+    n_visual_patches: int = 144
+    d_v: int = 1024
+    d_lm: int = 3072
     k_min: int = 1
-    k_max: int = 256
+    k_max: int = 144
 
 
 class ALVCConnector:
