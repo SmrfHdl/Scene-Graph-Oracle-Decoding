@@ -28,20 +28,23 @@ class ALVCConfig:
     """ALVC connector hyperparameters.
 
     Defaults are set for Phi-3.5-vision-instruct (microsoft/Phi-3.5-vision-instruct):
-        - CLIP ViT-L/14-336 vision encoder: 144 tokens per crop, image_dim_out=1024
+        - CLIP ViT-L/14-336 vision encoder: 144 tokens per crop, per-layer dim=1024
+        - Phi-3.5-Vision concatenates features from 4 CLIP layers -> projector
+          receives 4096-dim input per patch (verified empirically on uet 2026-05-21)
         - Phi-3.5-mini LM: hidden_size=3072
         - Phase 0 fixes num_crops=1, so n_visual_patches = 144
 
     Attributes:
         n_visual_patches: Number of patches from vision encoder per crop.
-        d_v: Vision feature dimension (image_dim_out).
+        d_v: Vision feature dimension AS RECEIVED BY THE PROJECTOR (=4096 for
+            Phi-3.5-Vision, which is 4 CLIP layers x 1024 concatenated).
         d_lm: LM input dimension (hidden_size).
         k_min: Minimum K (typically 1).
         k_max: Maximum K (typically = n_visual_patches).
     """
 
     n_visual_patches: int = 144
-    d_v: int = 1024
+    d_v: int = 4096
     d_lm: int = 3072
     k_min: int = 1
     k_max: int = 144

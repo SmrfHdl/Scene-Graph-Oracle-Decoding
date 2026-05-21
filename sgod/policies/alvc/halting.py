@@ -42,7 +42,7 @@ class HaltingConfig:
     k_max: int = 144
     lambda_p: float = 0.1
     beta: float = 0.01
-    d_v: int = 1024
+    d_v: int = 4096
     d_q: int = 3072
     d_hidden: int = 512
     query_conditioned: bool = True
