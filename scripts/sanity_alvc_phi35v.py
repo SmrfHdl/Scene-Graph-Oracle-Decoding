@@ -124,8 +124,12 @@ def main() -> int:
     print(f"  input_ids shape       = {tuple(inputs.input_ids.shape)}")
     print(f"  pixel_values shape    = {tuple(inputs.pixel_values.shape)}")
     print(f"  image_sizes           = {inputs.image_sizes.tolist()}")
+    # Disable KV cache to avoid Phi-3.5-Vision modeling code touching the cache
+    # API (DynamicCache.from_legacy_cache / get_usable_length are removed in
+    # newer transformers). Sanity check only needs one forward, no generation.
+    model.config.use_cache = False
     with torch.no_grad():
-        out = model(**inputs, return_dict=True)
+        out = model(**inputs, use_cache=False, return_dict=True)
     print(f"  output.logits shape   = {tuple(out.logits.shape)}")
     print("\n[sanity] OK. ALVC will replace model.model.vision_embed_tokens.img_projection.")
     return 0
