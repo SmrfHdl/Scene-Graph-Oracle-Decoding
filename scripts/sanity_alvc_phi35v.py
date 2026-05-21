@@ -47,7 +47,7 @@ def main() -> int:
     parser.add_argument(
         "--image",
         type=str,
-        default="test_imgs/test1.jpg",
+        default="test_imgs/image.png",
         help="Image path for forward pass.",
     )
     args = parser.parse_args()
@@ -102,7 +102,18 @@ def main() -> int:
     model = model.to(device)
     model.eval()
 
-    image = Image.open(args.image).convert("RGB")
+    import os
+    if os.path.exists(args.image):
+        image = Image.open(args.image).convert("RGB")
+        print(f"[sanity] Using image at {args.image}")
+    else:
+        # Fall back to a synthetic image for sanity (random noise 336x336 RGB)
+        import numpy as np
+        rng = np.random.default_rng(42)
+        arr = rng.integers(0, 255, size=(336, 336, 3), dtype=np.uint8)
+        image = Image.fromarray(arr)
+        print(f"[sanity] {args.image} not found; using 336x336 synthetic noise image")
+
     messages = [{"role": "user", "content": "<|image_1|>\nWhat is in this image?"}]
     prompt_text = processor.tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
