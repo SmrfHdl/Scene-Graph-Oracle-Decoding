@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/test_decoder.py --override-ini=\"addopts=\" -q)",
+      "Bash(uv run *)",
+      "Bash(uv pip *)"
+    ]
+  }
+}

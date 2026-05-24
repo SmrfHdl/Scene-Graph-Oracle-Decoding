@@ -10,6 +10,8 @@ See [docs/sgod_proposal.md](docs/sgod_proposal.md) for the full architecture pro
 
 ### 1. Environment
 
+SPIN=/home/uet/anaconda3/envs/spin/bin/python
+
 ```bash
 # Option A — uv (recommended for development)
 pip install uv

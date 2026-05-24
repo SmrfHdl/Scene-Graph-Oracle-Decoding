@@ -109,6 +109,7 @@ class SGODDecoder:
         bbox_score_multiplier: float = 1.0,
         flip_log_cap: int = 200,
         yesno_lambda: float = 0.0,
+        yesno_no_lambda: float | None = None,
     ) -> None:
         self.vlm          = vlm_model
         self.processor    = processor
@@ -129,6 +130,16 @@ class SGODDecoder:
         self.bbox_score_multiplier = bbox_score_multiplier
         self.flip_log_cap        = flip_log_cap
         self.yesno_lambda        = yesno_lambda
+        # Asymmetric injection magnitude for the no-side (has_bbox_target=False).
+        # Under hybrid SG with limited GD recall, ~60% of POPE yes-cases land in
+        # this branch (target exists but GD missed it). Pushing "no" in that
+        # branch creates false negatives that crater recall (ΔF1 ≈ -0.12 on
+        # the 2026-05-10 run). Set ``yesno_no_lambda=0.0`` to skip the no-side
+        # entirely (Option A — trust LLaVA when target not detected). Set to
+        # a smaller value (e.g. 0.5) to keep some adversarial flips while
+        # capping recall damage. ``None`` mirrors yesno_lambda (legacy
+        # symmetric behaviour).
+        self.yesno_no_lambda     = yesno_no_lambda
         # Pre-compute the set of token IDs that decode to "yes" or "no"
         # (across capitalisation + leading-space variants the LLaMA tokenizer
         # produces). The yes/no oracle injection adds yesno_lambda directly
@@ -260,30 +271,42 @@ class SGODDecoder:
             # conditions; this block routes the bbox-oracle's verdict
             # straight onto the yes/no logit positions.
             if do_yesno and len(generated_ids) == 0:
-                pre_top1_id = int(torch.argmax(logits).item())
-                pre_top1_word = self.tokenizer.decode([pre_top1_id]).strip()
-                yes_t = torch.tensor(self._yes_ids, device=logits.device, dtype=torch.long)
-                no_t  = torch.tensor(self._no_ids,  device=logits.device, dtype=torch.long)
                 if oracle.has_bbox_target:
                     # Pipeline detected the target → answer is most likely "yes".
                     # Direction signal from POPE spike: P(yes|match)=0.89.
-                    logits[yes_t] = logits[yes_t] + self.yesno_lambda
-                    logits[no_t]  = logits[no_t]  - self.yesno_lambda
+                    push_lambda = self.yesno_lambda
                     pushed = "yes"
                 else:
-                    # Pipeline didn't detect target → most no-cases land here
-                    # (P(no_match|no)=0.95) but ~60% of yes-cases also land
-                    # here due to limited GD recall. Pushing "no" here counts
-                    # on baseline LLaVA's known yes-bias getting flipped to
-                    # the right answer on adversarial cases.
-                    logits[yes_t] = logits[yes_t] - self.yesno_lambda
-                    logits[no_t]  = logits[no_t]  + self.yesno_lambda
+                    # Pipeline didn't detect target. Under hybrid SG with
+                    # limited GD recall, this branch mixes true negatives
+                    # (P(no_match|no)=0.95) with false negatives (~60% of
+                    # yes-cases also land here because GD missed the
+                    # object). The asymmetric ``yesno_no_lambda`` caps the
+                    # damage from the latter; ``0.0`` disables the no-push
+                    # entirely.
+                    push_lambda = (
+                        self.yesno_no_lambda
+                        if self.yesno_no_lambda is not None
+                        else self.yesno_lambda
+                    )
                     pushed = "no"
-                post_top1_id = int(torch.argmax(logits).item())
-                self.last_stats["yesno_fired"] = True
-                self.last_stats["yesno_pushed"] = pushed
-                self.last_stats["yesno_top1_before"] = pre_top1_word
-                self.last_stats["yesno_top1_after"]  = self.tokenizer.decode([post_top1_id]).strip()
+
+                if push_lambda > 0.0:
+                    pre_top1_id = int(torch.argmax(logits).item())
+                    pre_top1_word = self.tokenizer.decode([pre_top1_id]).strip()
+                    yes_t = torch.tensor(self._yes_ids, device=logits.device, dtype=torch.long)
+                    no_t  = torch.tensor(self._no_ids,  device=logits.device, dtype=torch.long)
+                    sign = 1.0 if pushed == "yes" else -1.0
+                    logits[yes_t] = logits[yes_t] + sign * push_lambda
+                    logits[no_t]  = logits[no_t]  - sign * push_lambda
+                    post_top1_id = int(torch.argmax(logits).item())
+                    self.last_stats["yesno_fired"] = True
+                    self.last_stats["yesno_pushed"] = pushed
+                    self.last_stats["yesno_top1_before"] = pre_top1_word
+                    self.last_stats["yesno_top1_after"]  = self.tokenizer.decode([post_top1_id]).strip()
+                else:
+                    # Asymmetric skip — record intent without modifying logits.
+                    self.last_stats["yesno_pushed"] = "skip_" + pushed
 
             # Oracle injection — only at anchor positions when oracle is active
             lam = ctx.get_lambda() * adversarial_scale

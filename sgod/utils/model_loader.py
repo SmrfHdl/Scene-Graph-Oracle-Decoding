@@ -209,6 +209,8 @@ def load_sgod_decoder(
     bbox_pad_ratio     = float(config["oracle"].get("bbox_pad_ratio", 0.15))
     bbox_score_multiplier = float(config["oracle"].get("bbox_score_multiplier", 1.0))
     yesno_lambda          = float(config["oracle"].get("yesno_lambda", 0.0))
+    _yesno_no_lambda_cfg  = config["oracle"].get("yesno_no_lambda", None)
+    yesno_no_lambda       = float(_yesno_no_lambda_cfg) if _yesno_no_lambda_cfg is not None else None
 
     ctx_cfg = config.get("context", {})
     base_lambda = ctx_cfg.get("base_lambda", {})
@@ -254,5 +256,6 @@ def load_sgod_decoder(
         bbox_pad_ratio=bbox_pad_ratio,
         bbox_score_multiplier=bbox_score_multiplier,
         yesno_lambda=yesno_lambda,
+        yesno_no_lambda=yesno_no_lambda,
     )
     return decoder

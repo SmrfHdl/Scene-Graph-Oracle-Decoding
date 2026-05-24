@@ -45,6 +45,14 @@ oracle:
   # λ=2.0 corresponds to ~2 logits, large enough to flip in many cases.
   # Set to 0.0 to disable.
   yesno_lambda: 2.0
+  # Asymmetric no-side magnitude. The 2026-05-10 POPE eval (symmetric λ=2.0)
+  # showed ΔF1 ≈ -0.12 across all three splits because GD recall miss
+  # (~60% of yes-cases) routes through the no-branch and gets pushed to
+  # "no" — false negatives crater recall. ``0.0`` disables the no-push
+  # entirely (Option A): trust LLaVA when target not detected. Set to
+  # e.g. 0.5 to keep some adversarial pressure with capped recall damage.
+  # ``null`` (None) mirrors ``yesno_lambda`` (legacy symmetric).
+  yesno_no_lambda: 0.0
 
 # --- Anchor Detector (Component 3) ---
 anchor:

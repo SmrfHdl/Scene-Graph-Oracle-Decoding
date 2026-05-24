@@ -23,6 +23,7 @@ VOCAB = {
     "a":     8,
     "cat":   9,
     "?":     10,
+    "yes":   11,
 }
 ID2WORD = {v: k for k, v in VOCAB.items()}
 EOS_ID  = VOCAB["<eos>"]
@@ -30,6 +31,9 @@ EOS_ID  = VOCAB["<eos>"]
 
 class FakeTokenizer:
     eos_token_id = EOS_ID
+
+    def __len__(self) -> int:
+        return len(VOCAB)
 
     def encode(self, text: str) -> list[int]:
         return [VOCAB.get(w, 99) for w in text.lower().split()]
@@ -346,3 +350,59 @@ def test_score_candidates_returns_zeros_all_neutral():
     oracle  = VisualOracle(sg, clip)
     scores  = SGODDecoder._score_candidates(["and", "but", "with"], ["dog"], oracle)
     assert scores.abs().sum().item() == 0.0
+
+
+# ── Yes/no asymmetric injection ───────────────────────────────────────────────
+
+def _make_yesno_decoder(yesno_no_lambda: float | None) -> SGODDecoder:
+    """Decoder configured to fire the yes/no injection block on the first token.
+
+    Uses an empty bbox oracle (enable_bbox_oracle=False) so has_bbox_target
+    is always False — exercising the no-branch.
+    """
+    sg = _make_sg()
+    return SGODDecoder(
+        vlm_model       = FakeVLM([VOCAB["no"], EOS_ID]),
+        tokenizer       = FakeTokenizer(),
+        sgg_module      = FakeSGGModule(sg),
+        clip_factory    = lambda _img: FakeCLIPScorer(),
+        top_k           = len(VOCAB),
+        yesno_lambda    = 2.0,
+        yesno_no_lambda = yesno_no_lambda,
+    )
+
+
+def test_yesno_symmetric_pushes_no_when_target_absent():
+    """Default (None) preserves legacy behaviour: full λ on no-side."""
+    decoder = _make_yesno_decoder(yesno_no_lambda=None)
+    decoder.generate(image=None, question="Is there a dog?")
+    assert decoder.last_stats["yesno_fired"] is True
+    assert decoder.last_stats["yesno_pushed"] == "no"
+
+
+def test_yesno_asymmetric_zero_skips_no_branch():
+    """yesno_no_lambda=0.0 (Option A) skips injection when target not detected."""
+    decoder = _make_yesno_decoder(yesno_no_lambda=0.0)
+    decoder.generate(image=None, question="Is there a dog?")
+    assert decoder.last_stats["yesno_fired"] is False
+    assert decoder.last_stats["yesno_pushed"] == "skip_no"
+    # Logits should be untouched on the no-side; verify by checking the
+    # captured before/after fields were not populated.
+    assert decoder.last_stats["yesno_top1_before"] is None
+    assert decoder.last_stats["yesno_top1_after"]  is None
+
+
+def test_yesno_asymmetric_partial_still_fires():
+    """yesno_no_lambda=0.5 (Option B) pushes with reduced magnitude."""
+    decoder = _make_yesno_decoder(yesno_no_lambda=0.5)
+    decoder.generate(image=None, question="Is there a dog?")
+    assert decoder.last_stats["yesno_fired"] is True
+    assert decoder.last_stats["yesno_pushed"] == "no"
+
+
+def test_yesno_does_not_fire_on_non_yesno_question():
+    """Open-ended questions bypass the injection block entirely."""
+    decoder = _make_yesno_decoder(yesno_no_lambda=0.0)
+    decoder.generate(image=None, question="What is in the image?")
+    assert decoder.last_stats["yesno_fired"] is False
+    assert decoder.last_stats["yesno_pushed"] is None
