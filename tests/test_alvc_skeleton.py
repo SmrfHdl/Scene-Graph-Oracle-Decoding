@@ -2,8 +2,6 @@
 
 Real unit tests added as halting + connector implementations land.
 """
-import pytest
-
 from sgod.policies.alvc.connector import ALVCConfig
 from sgod.policies.alvc.halting import HaltingConfig
 
@@ -22,15 +20,3 @@ def test_halting_config_defaults_sane():
     assert cfg.k_min < cfg.k_max
 
 
-def test_halting_head_skeleton_raises_until_implemented():
-    from sgod.policies.alvc.halting import HaltingHead
-
-    with pytest.raises(NotImplementedError):
-        HaltingHead(HaltingConfig())
-
-
-def test_connector_skeleton_raises_until_implemented():
-    from sgod.policies.alvc.connector import ALVCConnector
-
-    with pytest.raises(NotImplementedError):
-        ALVCConnector(ALVCConfig())
